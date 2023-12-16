@@ -703,10 +703,10 @@ class GrapQuantUpgrade(GraphQuant):
         self.__search_smaller_sk = kwargs.get("search_smaller_sk", False)
         self.__reload_sk_params = kwargs.get("reload_sk_params", False)
         self.__sk_params_json_path = kwargs.get("sk_params_json_path", "")
-        if self.__reload_sk_params:
+        if self.__reload_sk_params and os.path.exists(self.__sk_params_json_path):
             self.sk_params = json.load(open(self.__sk_params_json_path, "r"))  
             print("reload sk_params from: {}".format(self.__sk_params_json_path))
-            print(self.sk_params)        
+            # print(self.sk_params)        
         self.__fuse_act = kwargs['fuse_act']
         self.__input_names = kwargs['input_names']
         self.layer_cle_list = []
@@ -981,12 +981,18 @@ class GrapQuantUpgrade(GraphQuant):
             layer.set_qweights(q_weights)
             layer.set_weight(weights)
             has_bias = layer.get_layer_ops()['attrs'][0].get('bias')
+            # if layer.get_layer_name() == "/backbone/stage2/stage2.1/branch2/branch2.0/Conv":
+                # print("test")
             if has_bias:
                 # zero-point transfers
                 # print(layer_type, layer.get_idx())
                 bias = layer.get_layer_ops()['weights'][1]
                 layer.set_bias(bias)
-                si = layers[layer.get_input_idx()[0]].get_scale()[0]
+                # prelayer = layers[layer.get_input_idx()[0]]
+                # prelayer_out_names = prelayer.get_onnx_output_name()
+                # in_name = layer.get_onnx_input_name()[0]
+                # si = prelayer.get_scale()[prelayer_out_names.index(in_name)]
+                si = layer.get_in_scale()[0]
                 qbias = bias / (si['scale'] * w_scales['scale'])
                 qbias = np.round(qbias)
                 layer.set_qbias(qbias.astype(np.float32))
@@ -1231,7 +1237,14 @@ class GrapQuantUpgrade(GraphQuant):
                     elif self.__reload_sk_params:
                         layer_name = layer.get_layer_name()
                         si = layer.get_in_scale()[0]['scale']
+                        # prelayer = layers[layer.get_input_idx()[0]]
+                        # prelayer_out_names = prelayer.get_onnx_output_name()
+                        # in_name = layer.get_onnx_input_name()[0]
+                        # si = prelayer.get_scale()[prelayer_out_names.index(in_name)]                        
                         sk = self.sk_params[layer_name] / max_value
+                        sk_origin = layer.get_w_scale()['scale']
+                        diff_sk = sk_origin - sk
+                        # print(layer_name + ", sk:", sk_origin, sk, diff_sk, max_value)
                     else:
                         print("please set search_smaller_sk or reload_sk_params to true!!!")
                         os._exit(-1)
@@ -1239,11 +1252,18 @@ class GrapQuantUpgrade(GraphQuant):
                     layer.set_w_scale(dict(scale=sk, zero_point=layer.get_w_scale()['zero_point']))
                     qbias = bias / (si * sk)
                     qbias = np.round(qbias)
-                    layer.set_qbias(qbias.astype(np.float32))
+                    qbias_origin, qweight_origin = layer.get_qbias(), layer.get_qweight()
+                    qbias = qbias.astype(np.float32)
+                    layer.set_qbias(qbias)
                     qweight = get_quan_data(copy.deepcopy(weight), scale=sk, zero_point=layer.get_w_scale()['zero_point'])
-                    qweight = qweight.astype(layer.get_qweight().dtype)
+                    qweight = qweight.astype(qweight_origin.dtype)
                     layer.set_qweights(qweight)
-
+                    diff = np.abs(qbias_origin - qbias).sum()
+                    if (diff > 0):
+                    # if layer_name == "/backbone/stage2/stage2.1/branch2/branch2.0/Conv":
+                        print(layer_name, "weight: ", np.abs(qweight_origin - qweight).sum(), " bias: ", diff, "si: ", layer.get_in_scale()[0]['scale'])
+                        # print(layer_name + ", sk:", sk_origin, sk, diff_sk, max_value)
+                        
                 # zero point already implement
                 layer.setting_ops(settings)
                 # save ops settings
