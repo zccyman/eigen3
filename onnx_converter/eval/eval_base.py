@@ -5,6 +5,7 @@
 #@Company : SHIQING TECH
 #@Time    : 2022/03/30 09:53:07
 #@File    : eval.py
+import csv
 import os
 
 import numpy as np
@@ -101,6 +102,14 @@ class Eval(Object): # type: ignore
 
         for head, align in zip(table_head, table_head_align):
             tb.align[head] = align
+            
+        if os.path.exists('work_dir/accuracy.csv'):
+            os.remove('work_dir/accuracy.csv')
+        with open('work_dir/accuracy.csv', 'w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(tb.field_names)
+            for row in tb.rows:
+                writer.writerow(row)
             
         return tb
     
