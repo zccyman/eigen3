@@ -60,8 +60,8 @@ import git
 
 # copy source file to site-packages
 packages = 'onnx_converter'
-if not os.path.exists(packages):
-    shutil.copytree('onnx-converter', packages)
+# if not os.path.exists(packages):
+    # shutil.copytree('onnx-converter', packages)
     # shutil.rmtree('onnx-converter')
 py_packages = set(find_packages()) | {packages}
 # packages = 'onnx_converter'
