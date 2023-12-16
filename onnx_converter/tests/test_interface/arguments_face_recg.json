@@ -1,0 +1,38 @@
+{
+    "converter_args":
+    {
+        "chip_model": "AT5050_C_EXTEND",
+        "calibration_dataset_dir" : "/buffer/faces_emore/",
+        "evaluation_dataset_dir": "/buffer/faces_emore/",
+        "dataset_name": "lfw",
+        "feat_dim": 512,
+        "nrof_folds": 5,
+        "metric": "euclidean",
+        "max_threshold": 4,
+        "test_sample_num": 200,       
+        "error_analyzer": 0,
+        "acc_error": true,
+        "quantization_args":
+        {  
+            "out_type" : "int8",
+            "method":
+            {
+                "feature": ["symm", 8], 
+                "weight": ["symm", "per_tensor", 8]
+            },
+            "process_scale":"intscaleex"
+        },
+        "log_args":
+        {
+            "log_name":"process.log",
+            "log_level": 50
+        },
+        "layer_error_args":
+        {
+            "check_error": 0,
+            "acc_error": true,
+            "metrics_list": ["Cosine", "L1", "L2"]
+        },
+        "device": "cuda:3" 
+    }
+}

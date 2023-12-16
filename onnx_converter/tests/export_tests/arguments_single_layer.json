@@ -1,0 +1,107 @@
+{
+	"chip_types": [ "AT5050" ],
+	"quantize_methods": {
+		"sym/sym_pertensor": [
+			"lstm",
+			"gru",
+			"conv",
+			"depthwiseconv",
+			"convtranspose",
+			"fc",
+			"layernormalization",
+			"batchnormalization",
+			"instancenormalization",
+			"softmax",
+			"resize",
+			"reducemin",
+			"reducemax",
+			"reducemean",
+			"reducesum",
+			"reduceprod",	
+			"transpose",	
+			"pad",	
+			"pmul",
+			"cmul",
+			"matmul",			
+			"averagepool",
+			"globalaveragepool",
+			"maxpool",
+			"shuffle_only",
+			"add",
+			"cadd",
+			"sub",
+			"csub",
+			"concat",
+			"split",
+			"relu",
+			"relux",
+			"relu6",
+			"leakyrelu",
+			"prelu",
+			"sigmoid",
+			"swish",
+			"gelu",
+			"tanh",
+			"hardsigmoid",
+			"hardswish"
+		]			  
+	},
+	"quantize_dtypes": [ "int8" ],
+	"process_scale": {
+		"intscale/floatscale/shiftfloatscale/shiftfloatscaletable": [
+			"conv", "depthwiseconv", "convtranspose", "fc"
+		],
+		"shiftfloatscaletable2float": [
+			"conv", "depthwiseconv", "convtranspose", "fc"
+		],
+		"intscale/floatscale/float": [ "pmul", "cmul", "matmul"],
+		"table/float": [
+			"leakyrelu", "prelu", "gelu", "sigmoid", "swish", 
+			"tanh", "hardsigmoid", "hardtanh", "hardswish", 
+			"hardshrink", "softmax"
+		],
+		"intscale": ["averagepool", "globalaveragepool"], 
+		"smooth": [
+			"averagepool", "globalaveragepool", "maxpool", "shuffle_only",
+			"transpose", "pad" 
+		],
+		"shiftfloatscaletable": [
+			"concat", "split", "add", "cadd", "sub", "csub", "pmul", "cmul"
+		], 
+		"preintscaleex": ["resize"],
+		"preintscale": [
+			"concat", "split", "shuffle", "add", "sub", "cadd", "csub", 
+			"relu", "relux", "relu6", "resize"
+		],
+		"float": [
+			"layernormalization", "batchnormalization", "instancenormalization", 
+			"resize", "averagepool", "maxpool", "globalaveragepool", 
+			"reducemin", "reducemax", "reducemean", "reducesum", "reduceprod"
+		],
+		"ffloatscale": [ "lstm", "gru"]
+	},
+	"in_types": {
+		"int8": [
+			"intscale", "floatscale", "shiftfloatscale", "shiftfloatscaletable", 
+			"float", "table", "smooth", "preintscale", "preintscaleex", "ffloatscale", 
+			"shiftfloatscaletable2float"
+		],
+		"int16": [
+			"intscale", "floatscale", "shiftfloatscale", "shiftfloatscaletable", 
+			"float", "table", "smooth", "preintscale", "preintscaleex", "ffloatscale",
+			"shiftfloatscaletable2float"
+		],
+		"float32": [ "ffloatscale" ]
+	},
+	"out_types": {
+		"int8": [ "intscale", "floatscale", "shiftfloatscale", "shiftfloatscaletable", "float", "table", "smooth", "preintscale", "preintscaleex", "ffloatscale"],
+		"int16": [ "intscale", "floatscale", "shiftfloatscale", "shiftfloatscaletable", "float", "table", "smooth", "preintscale", "preintscaleex", "ffloatscale"],
+		"float32": [ "ffloatscale", "shiftfloatscaletable2float"]
+	},
+	"weights_dir": "work_dir/test_single_layer",
+	"chips_only_support_model_c": ["AT1K"],
+	"virtual_round": 3,
+	"valid_layer_types": [ "shuffle_only" ],
+	"use_input_settings": true,
+	"use_input_settings_combination": true
+}

@@ -1,0 +1,30 @@
+[
+    {
+        "lfw_imgsize1_mobilenet_pre1_post1": {
+            "L1": [
+                85.1103,
+                206.5155
+            ],
+            "L2": [
+                72.5101,
+                403.2025
+            ],
+            "Cosine": [
+                30.4677,
+                86.1262
+            ]
+        }
+    },
+    {
+        "lfw_imgsize1_mobilenet_pre1_post1": {
+            "accuracy": [
+                0.9532,
+                0.5391
+            ],
+            "best_threshold": [
+                1.214,
+                0.662
+            ]
+        }
+    }
+]

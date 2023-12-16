@@ -1,0 +1,32 @@
+{
+    "converter_args":
+    {
+        "chip_model": "AT5050_C_EXTEND",
+        "calibration_dataset_dir" : "images/face_antispoof/calib/",
+        "evaluation_dataset_dir": "images/face_antispoof/eval/",
+        "error_analyzer": 0,
+        "acc_error": true,
+        "quantization_args":
+        {  
+            "out_type" : "int8",
+            "method":
+            {
+                "feature": ["symm", 8], 
+                "weight": ["symm", "per_tensor", 8]
+            },
+            "process_scale":"intscale"
+        },
+        "log_args":
+        {
+            "log_name":"process.log",
+            "log_level": 50
+        },
+        "layer_error_args":
+        {
+            "check_error": 0,
+            "acc_error": true,
+            "metrics_list": ["Cosine", "L1", "L2"]
+        },
+        "device": "cuda:3" 
+    }
+}

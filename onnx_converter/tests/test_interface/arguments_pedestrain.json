@@ -1,0 +1,34 @@
+{
+    "converter_args":
+    {
+        "chip_model": "AT5050_C_EXTEND",
+        "bgr_format": false,
+        "user_model": false,
+        "calibration_dataset_dir" : "/buffer/coco/cocoperson/images/",
+        "evaluation_dataset_dir": "/buffer/coco/cocoperson/",
+        "error_analyzer": 0,
+        "acc_error": true,
+        "quantization_args":
+        {  
+            "out_type" : "int8",
+            "method":
+            {
+                "feature": ["symm", 8], 
+                "weight": ["symm", "per_tensor", 8]
+            },
+            "process_scale":"intscale"
+        },
+        "log_args":
+        {
+            "log_name":"process.log",
+            "log_level": 50
+        },
+        "layer_error_args":
+        {
+            "check_error": 0,
+            "acc_error": true,
+            "metrics_list": ["Cosine", "L1", "L2"]
+        },
+        "device": "cuda:3" 
+    }
+}

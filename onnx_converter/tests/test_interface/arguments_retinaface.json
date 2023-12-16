@@ -1,0 +1,33 @@
+{
+    "converter_args":
+    {
+        "chip_model": "AT5050_C_EXTEND",
+        "bgr_format": true,
+        "user_model": false,
+        "calibration_dataset_dir" : "/buffer/AFLW/sub_test_data/flickr_3/image/",
+        "evaluation_dataset_dir": "/buffer/AFLW/sub_test_data/flickr_2/",
+        "acc_error": true,
+        "quantization_args":
+        {  
+            "out_type" : "int8",
+            "method":
+            {
+                "feature": ["symm", 8], 
+                "weight": ["symm", "per_tensor", 8]
+            },
+            "process_scale":"table"
+        },
+        "log_args":
+        {
+            "log_name":"process.log",
+            "log_level": 50
+        },
+        "layer_error_args":
+        {
+            "do_check_error": 0,
+            "acc_error": true,
+            "metrics_list": ["Cosine", "L1", "L2"]
+        },
+        "device": "cuda:3" 
+    }
+}
