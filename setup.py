@@ -1641,7 +1641,7 @@ setup(
 
 
 
-cleanup_build_outputs('./', packages)
+# cleanup_build_outputs('./', packages)
 
 # copy static files
 # static_files_folder = 'onnx-converter/perf_data/'
