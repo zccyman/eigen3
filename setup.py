@@ -72,15 +72,15 @@ def read():
     with open(f"{packages}/benchmark/requirement.txt", "r") as f:
         return f.readlines()
     
-repo = git.Repo(packages)
-branch_name = "master"
-branch = repo.branches[branch_name]
-commit_id = str(branch.commit.hexsha).strip()
-commit_id_path = f"{packages}/utest/data"
-if not os.path.exists(commit_id_path):
-    os.makedirs(commit_id_path)
-with open(os.path.join(commit_id_path, "commit_id.txt"), "w") as f:
-    f.write(":".join([branch_name, commit_id]))
+# repo = git.Repo(packages)
+# branch_name = "master"
+# branch = repo.branches[branch_name]
+# commit_id = str(branch.commit.hexsha).strip()
+# commit_id_path = f"{packages}/utest/data"
+# if not os.path.exists(commit_id_path):
+#     os.makedirs(commit_id_path)
+# with open(os.path.join(commit_id_path, "commit_id.txt"), "w") as f:
+#     f.write(":".join([branch_name, commit_id]))
 
 # Notice2: exclude files.
 EXCLUDE_FILES = [
