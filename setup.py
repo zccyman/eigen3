@@ -1632,7 +1632,7 @@ setup(
     include_package_data=True,
     packages=[
         f'{packages}/perf_data', 
-        f'{packages}/utest/data', 
+        # f'{packages}/utest/data', 
         f'{packages}/extension/libs',
     ],
     install_requires=read(),
