@@ -23,6 +23,14 @@ def weight_correction(weight, quan_method):
     return qweight
 
 def cross_layer_equalization(layer, layers, skip_layer_names=[]):
+    def is_valid_act(node_types):
+        has_valid_act = False
+        for _act in ["relu", "leakyrelu"]:
+            if _act in node_types:
+                has_valid_act = True
+                break
+        return has_valid_act
+    
     flag_c = False # [conv + conv + conv] + concat + [conv + conv + conv]
     flag_m = False # conv + [conv + conv + conv]
     layer_next = None
@@ -43,22 +51,22 @@ def cross_layer_equalization(layer, layers, skip_layer_names=[]):
                     flag_c = False
         for layer_pre in layer_pre_list:
             node_types = [node.get_op_type().lower() for node in layer_pre.get_nodes()]
-            if layer_pre.get_layer_type() not in ["conv"] or 'relu' not in node_types:
+            if layer_pre.get_layer_type() not in ["conv"] or not is_valid_act(node_types):
                 flag_c = False
         for layer_nxt in layer_next_list:                    
             if layer_nxt.get_layer_type() not in ["conv"]:
                 flag_c = False
-    elif layer_type in ["fc", "conv"] and 'relu' in node_types and len(layer.get_output_idx()) == 1:
+    elif layer_type in ["fc", "conv"] and is_valid_act(node_types) and len(layer.get_output_idx()) == 1:
         layer_next = layers[layer.get_output_idx()[0]]
         node_types = [node.get_op_type().lower()
                       for node in layer_next.get_nodes()]
         if layer_next.get_layer_type() not in ["fc", "conv", "depthwiseconv", "batchnormalization"]:
             layer_next = None
-        elif len(layer_next.get_output_idx()) == 1 and layer_next.get_layer_type() == "depthwiseconv" and 'relu' in node_types:
+        elif len(layer_next.get_output_idx()) == 1 and layer_next.get_layer_type() == "depthwiseconv" and is_valid_act(node_types):
             layer_next2 = layers[layer_next.get_output_idx()[0]]
             if layer_next2.get_layer_type() not in ["conv"]:
                 layer_next2 = None
-    elif layer_type in ["fc", "conv"] and 'relu' in node_types and len(layer.get_output_idx()) > 1:
+    elif layer_type in ["fc", "conv"] and is_valid_act(node_types) and len(layer.get_output_idx()) > 1:
         output_idxs = layer.get_output_idx()
         layer_next_list = [layers[output_idx] for output_idx in output_idxs]
         layer_next_types = [layer.get_layer_type() for layer in layer_next_list]
