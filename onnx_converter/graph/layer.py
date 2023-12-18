@@ -2236,7 +2236,7 @@ class Conv(WeightedLayer):
                         dtype=np.float32, # type: ignore
                     )
                 )  
-            elif self.get_nodes()[1].get_op_type().lower() in ["leakyrelu"]:   
+            elif self.get_nodes()[1].get_op_type().lower() in ["leakyrelu", "hardsigmoid"]:   
                 nodes.append(
                     self.create_node(
                         self.get_nodes()[1].get_op_type(),
