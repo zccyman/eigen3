@@ -8,7 +8,6 @@
 
 
 is_debug = False
-is_voice_model = False
 export_mode_c = False
 chip_type = "AT5050"  # [AT1K, AT5050,]
 save_placeholder_params = True
@@ -24,12 +23,11 @@ bits = dict(
     Ksize=Ksize,
     I_Align=I_Align,
     O_Align=O_Align,
-    ABGR=True, ## if first layer is fc, ABGR=False
+    ABGR=True,
     DATA_C_EXTEND=AT5050_C_EXTEND,
     save_placeholder_params=save_placeholder_params,
     chip_type=chip_type,
     bgr_format=True,
-    is_voice_model=is_voice_model,
     is_debug=is_debug,
 )
 

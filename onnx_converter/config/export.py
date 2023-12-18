@@ -9,7 +9,6 @@
 secret_key = "henson.zhang@timesintelli.com"
 
 is_debug = False
-is_voice_model = False
 export_mode_c = True
 chip_type = "AT1K"  # [AT1K, AT5050,]
 
@@ -29,7 +28,6 @@ bits = dict(
     DATA_C_EXTEND=AT5050_C_EXTEND,
     chip_type=chip_type,
     bgr_format=True,
-    is_voice_model=is_voice_model,    
     is_debug=is_debug,
 )
 
