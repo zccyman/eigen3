@@ -1245,6 +1245,7 @@ class GrapQuantUpgrade(GraphQuant):
                         sk_origin = layer.get_w_scale()['scale']
                         diff_sk = sk_origin - sk
                         # print(layer_name + ", sk:", sk_origin, sk, diff_sk, max_value)
+                        print(layer_name, ", sk: ", sk_origin * max_value, self.sk_params[layer_name], max_value)
                     else:
                         print("please set search_smaller_sk or reload_sk_params to true!!!")
                         os._exit(-1)
@@ -1259,9 +1260,9 @@ class GrapQuantUpgrade(GraphQuant):
                     qweight = qweight.astype(qweight_origin.dtype)
                     layer.set_qweights(qweight)
                     diff = np.abs(qbias_origin - qbias).sum()
-                    if (diff > 0):
+                    # if (diff > 0):
                     # if layer_name == "/backbone/stage2/stage2.1/branch2/branch2.0/Conv":
-                        print(layer_name, "weight: ", np.abs(qweight_origin - qweight).sum(), " bias: ", diff, "si: ", layer.get_in_scale()[0]['scale'])
+                        # print(layer_name, "weight: ", np.abs(qweight_origin - qweight).sum(), " bias: ", diff, "si: ", layer.get_in_scale()[0]['scale'])
                         # print(layer_name + ", sk:", sk_origin, sk, diff_sk, max_value)
                         
                 # zero point already implement
