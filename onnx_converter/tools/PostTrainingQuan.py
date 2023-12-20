@@ -15,8 +15,13 @@ import cv2
 import copy
 import numpy as np
 import onnxruntime as rt
+import torch
 from tqdm import tqdm
 import json
+from absl import logging
+from collections import Counter
+import numpy as np
+from scipy.stats import entropy
 
 try:
     from utils import flatten_list, Object, process_im, save_txt
@@ -28,6 +33,260 @@ except:
     from onnx_converter.extension.libs.kld import calculate_threshold, calculate_kld_vector, calculate_kld_kernel # type: ignore
 
 
+def _compute_amax_entropy(calib_hist, calib_bin_edges, num_bits=8, unsigned=True, stride=1, start_bin=128):
+    """Returns amax that minimizes KL-Divergence of the collected histogram"""
+
+    # If calibrator hasn't collected any data, return none
+    if calib_bin_edges is None and calib_hist is None:
+        return None
+
+    def _normalize_distr(distr):
+        summ = np.sum(distr)
+        if summ != 0:
+            distr = distr / summ
+
+    bins = calib_hist[:]
+    bins[0] = bins[1]
+
+    total_data = np.sum(bins)
+
+    divergences = []
+    arguments = []
+
+    # we are quantizing to 128 values + sign if num_bits=8, nbins=256
+    nbins = 1 << (num_bits - 1 + int(unsigned))
+
+    starting = start_bin
+    stop = len(bins)
+
+    new_density_counts = np.zeros(nbins, dtype=np.float64)
+
+    for i in range(starting, stop + 1, stride):
+        new_density_counts.fill(0)
+        space = np.linspace(0, i, num=nbins + 1)
+        digitized_space = np.digitize(range(i), space) - 1
+
+        digitized_space[bins[:i] == 0] = -1
+
+        for idx, digitized in enumerate(digitized_space):
+            if digitized != -1:
+                new_density_counts[digitized] += bins[idx]
+
+        counter = Counter(digitized_space)
+        for key, val in counter.items():
+            if key != -1:
+                new_density_counts[key] = new_density_counts[key] / val
+
+        new_density = np.zeros(i, dtype=np.float64)
+        for idx, digitized in enumerate(digitized_space):
+            if digitized != -1:
+                new_density[idx] = new_density_counts[digitized]
+
+        total_counts_new = np.sum(new_density) + np.sum(bins[i:])
+        _normalize_distr(new_density)
+
+        reference_density = np.array(bins[:len(digitized_space)])
+        reference_density[-1] += np.sum(bins[i:])
+
+        total_counts_old = np.sum(reference_density)
+        if round(total_counts_new) != total_data or round(total_counts_old) != total_data:
+            raise RuntimeError("Count mismatch! total_counts_new={}, total_counts_old={}, total_data={}".format(
+                total_counts_new, total_counts_old, total_data))
+
+        _normalize_distr(reference_density)
+
+        ent = entropy(reference_density, new_density)
+        divergences.append(ent)
+        arguments.append(i)
+
+    divergences = np.array(divergences)
+    logging.debug("divergences={}".format(divergences))
+    last_argmin = len(divergences) - 1 - np.argmin(divergences[::-1])
+    calib_amax = calib_bin_edges[last_argmin * stride + starting]
+    calib_amax = torch.tensor(calib_amax.item()) #pylint: disable=not-callable
+
+    return calib_amax
+
+def _compute_amax_mse(calib_hist, calib_bin_edges, num_bits=8, unsigned=True, stride=1, start_bin=128):
+    """Returns amax that minimizes MSE of the collected histogram"""
+
+    # If calibrator hasn't collected any data, return none
+    if calib_bin_edges is None and calib_hist is None:
+        return None
+
+    counts = torch.from_numpy(calib_hist[:]).float().cuda()
+    edges = torch.from_numpy(calib_bin_edges[:]).float().cuda()
+    centers = (edges[1:] + edges[:-1]) / 2
+    max_value = 2.0 ** (num_bits - 1) - 1
+    min_value = -2.0 ** (num_bits - 1)
+    
+    mses = []
+    arguments = []
+
+    for i in range(start_bin, len(centers), stride):
+
+        amax = centers[i]
+        scale = amax / max_value
+        quant_centers = torch.round(centers / scale).clamp(min_value, max_value) * scale
+        # quant_centers = fake_tensor_quant(centers, amax, num_bits, unsigned)
+
+        mse = ((quant_centers - centers)**2 * counts).mean()
+
+        mses.append(mse.cpu())
+        arguments.append(i)
+
+    logging.debug("mses={}".format(mses))
+    argmin = np.argmin(mses)
+    calib_amax = centers[arguments[argmin]]
+
+    return calib_amax.cpu()
+
+def _compute_amax_percentile(calib_hist, calib_bin_edges, percentile):
+    """Returns amax that clips the percentile fraction of collected data"""
+
+    if percentile < 0 or percentile > 100:
+        raise ValueError("Invalid percentile. Must be in range 0 <= percentile <= 100.")
+
+    # If calibrator hasn't collected any data, return none
+    if calib_bin_edges is None and calib_hist is None:
+        return None
+
+    total = calib_hist.sum()
+    cdf = np.cumsum(calib_hist / total)
+    idx = np.searchsorted(cdf, percentile / 100)
+    calib_amax = calib_bin_edges[idx]
+    calib_amax = torch.tensor(calib_amax.item()) #pylint: disable=not-callable
+
+    return calib_amax
+
+
+class HistogramCalibrator(object):
+    """Unified histogram calibrator
+
+    Histogram will be only collected once. compute_amax() performs entropy, percentile, or mse
+        calibration based on arguments
+
+    Args:
+        num_bits: An integer. Number of bits of quantization.
+        axis: A tuple. see QuantDescriptor.
+        unsigned: A boolean. using unsigned quantization.
+        num_bins: An integer. Number of histograms bins. Default 2048.
+        grow_method: A string. DEPRECATED. default None.
+        skip_zeros: A boolean. If True, skips zeros when collecting data for histogram. Default False.
+        torch_hist: A boolean. If True, collect histogram by torch.histc instead of np.histogram. If input tensor
+            is on GPU, histc will also be running on GPU. Default True.
+    """
+    def __init__(self, num_bits=8, axis=None, unsigned=True, num_bins=2048, grow_method=None, skip_zeros=False, torch_hist=False):
+        super(HistogramCalibrator, self).__init__()
+        self._num_bins = num_bins
+        self._skip_zeros = skip_zeros
+
+        self._calib_bin_edges = None
+        self._calib_hist = None
+
+        self._torch_hist = torch_hist
+
+        if axis is not None:
+            raise NotImplementedError("Calibrator histogram collection only supports per tensor scaling")
+
+        if grow_method is not None:
+            logging.warning("grow_method is deprecated. Got %s, ingored!", grow_method)
+
+    def collect(self, x):
+        """Collect histogram"""
+        if np.min(x) < 0.:
+            logging.log_first_n(
+                logging.INFO,
+                ("Calibrator encountered negative values. It shouldn't happen after ReLU. "
+                 "Make sure this is the right tensor to calibrate."),
+                1)
+            x = np.abs(x)
+
+        x = x.astype(np.float32)
+
+        if not self._torch_hist:
+            x_np = x #.cpu().detach().numpy()
+
+            if self._skip_zeros:
+                x_np = x_np[np.where(x_np != 0)]
+
+            if self._calib_bin_edges is None and self._calib_hist is None:
+                # first time it uses num_bins to compute histogram.
+                self._calib_hist, self._calib_bin_edges = np.histogram(x_np, bins=self._num_bins)
+            else:
+                temp_amax = np.max(x_np)
+                if temp_amax > self._calib_bin_edges[-1]:
+                    # increase the number of bins
+                    width = self._calib_bin_edges[1] - self._calib_bin_edges[0]
+                    # NOTE: np.arange may create an extra bin after the one containing temp_amax
+                    new_bin_edges = np.arange(self._calib_bin_edges[-1] + width, temp_amax + width, width)
+                    self._calib_bin_edges = np.hstack((self._calib_bin_edges, new_bin_edges))
+                hist, self._calib_bin_edges = np.histogram(x_np, bins=self._calib_bin_edges)
+                hist[:len(self._calib_hist)] += self._calib_hist
+                self._calib_hist = hist
+        else:
+            # This branch of code is designed to match numpy version as close as possible
+            with torch.no_grad():
+                if self._skip_zeros:
+                    x = x[torch.where(x != 0)]
+
+                # Because we collect histogram on absolute value, setting min=0 simplifying the rare case where
+                # minimum value is not exactly 0 and first batch collected has larger min value than later batches
+                x_max = x.max()
+                if self._calib_bin_edges is None and self._calib_hist is None:
+                    self._calib_hist = torch.histc(x, bins=self._num_bins, min=0, max=x_max)
+                    self._calib_bin_edges = torch.linspace(0, x_max, self._num_bins + 1)
+                else:
+                    if x_max > self._calib_bin_edges[-1]:
+                        width = self._calib_bin_edges[1] - self._calib_bin_edges[0]
+                        self._num_bins = int((x_max / width).ceil().item())
+                        self._calib_bin_edges = torch.arange(0, x_max + width, width, device=x.device)
+
+                    hist = torch.histc(x, bins=self._num_bins, min=0, max=self._calib_bin_edges[-1])
+                    hist[:self._calib_hist.numel()] += self._calib_hist
+                    self._calib_hist = hist
+
+    def reset(self):
+        """Reset the collected histogram"""
+        self._calib_bin_edges = None
+        self._calib_hist = None
+
+    def compute_amax(
+            self, method: str, *, stride: int = 1, start_bin: int = 128, percentile: float = 99.99):
+        """Compute the amax from the collected histogram
+
+        Args:
+            method: A string. One of ['entropy', 'mse', 'percentile']
+
+        Keyword Arguments:
+            stride: An integer. Default 1
+            start_bin: An integer. Default 128
+            percentils: A float number between [0, 100]. Default 99.99.
+
+        Returns:
+            amax: a tensor
+        """
+        if isinstance(self._calib_hist, torch.Tensor):
+            calib_hist = self._calib_hist.int().cpu().numpy()
+            calib_bin_edges = self._calib_bin_edges.cpu().numpy()
+        else:
+            calib_hist = self._calib_hist
+            calib_bin_edges = self._calib_bin_edges
+
+        if method == 'entropy':
+            calib_amax = _compute_amax_entropy(
+                calib_hist, calib_bin_edges, self._num_bits, self._unsigned, stride, start_bin)
+        elif method == 'mse':
+            calib_amax = _compute_amax_mse(
+                calib_hist, calib_bin_edges, self._num_bits, self._unsigned, stride, start_bin)
+        elif method == 'percentile':
+            calib_amax = _compute_amax_percentile(calib_hist, calib_bin_edges, percentile)
+        else:
+            raise TypeError("Unknown calibration method {}".format(method))
+
+        return calib_amax
+    
+    
 def calibration_histogram(feat_arrays: dict):
     pass
 
@@ -364,20 +623,41 @@ class PostTrainingQuan(Object): # type: ignore
         self.logger.info('dataset len is: {}'.format(len(datasets)))
 
         self.__is_ema = len(datasets) > 100
-        self.logger.info('start quantize datasets!')
-        idx = 0
-        for name in tqdm(datasets, postfix="quant datasets"):
-            if isinstance(name, str) and not os.path.exists(name):
-                self.logger.info('file is not exists!')
-                continue
-            # in_data = self.onnx_infer(name)
-            # scales = self.__model.forward(in_data)
-            scales = self.onnx_infer(name)
-            self.ema_scales(scales)
-            # self.MinMaxScales(scales, idx=idx+1)
-            idx += 1
-        self.logger.info('end quantize datasets!')
-
+        if 0:
+            self.logger.info('start quantize datasets!')
+            idx = 0
+            for name in tqdm(datasets, postfix="quant datasets"):
+                if isinstance(name, str) and not os.path.exists(name):
+                    self.logger.info('file is not exists!')
+                    continue
+                # in_data = self.onnx_infer(name)
+                # scales = self.__model.forward(in_data)
+                scales = self.onnx_infer(name)
+                self.ema_scales(scales)
+                # self.MinMaxScales(scales, idx=idx+1)
+                idx += 1
+            self.logger.info('end quantize datasets!')
+        else:
+            self.logger.info('start quantize datasets!')
+            HistogramCalibrators = {}
+            for name in tqdm(datasets, postfix='quantize datasets') if self.is_stdout else datasets:
+                if isinstance(name, str) and not os.path.exists(name):
+                    self.logger.info('file is not exists!')
+                    continue
+                scales = self.onnx_infer(name)
+                for key in scales.keys():
+                    if key not in HistogramCalibrators.keys():
+                        HistogramCalibrators[key] = HistogramCalibrator()
+                    HistogramCalibrators[key].collect(scales[key])
+            
+            for key in HistogramCalibrators.keys():
+                max_v = HistogramCalibrators[key].compute_amax(method='entropy') # ['entropy', 'mse', 'percentile']
+                min_v = -max_v
+                scales_ = dict(min=min_v.numpy(), max=max_v.numpy(), zeros_point=0)  
+                self.__scales[key] = scales_
+                
+            self.logger.info('end quantize datasets!')
+        
         if self.__is_ema:
             for key in self.__scales.keys():
                 if isinstance(self.__scales[key], list):
