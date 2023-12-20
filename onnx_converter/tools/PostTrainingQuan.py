@@ -625,7 +625,7 @@ class PostTrainingQuan(Object): # type: ignore
         self.logger.info('dataset len is: {}'.format(len(datasets)))
 
         self.__is_ema = len(datasets) > 100
-        if 0:
+        if 1:
             self.logger.info('start quantize datasets!')
             idx = 0
             for name in tqdm(datasets, postfix="quant datasets"):
@@ -652,8 +652,8 @@ class PostTrainingQuan(Object): # type: ignore
                         HistogramCalibrators[key] = HistogramCalibrator()
                     HistogramCalibrators[key].collect(scales[key])
                 # break
-            method = 'mse'  # ['entropy', 'mse', 'percentile':99.999]
-            for key in tqdm(HistogramCalibrators.keys(), postfix=f'compute_amax use {method}') if self.is_stdout else HistogramCalibrators.keys():
+            method = 'percentile'  # ['entropy', 'mse', 'percentile':99.999]
+            for key in tqdm(HistogramCalibrators.keys(), postfix=f'compute_amax use {method} method') if self.is_stdout else HistogramCalibrators.keys():
                 max_v = HistogramCalibrators[key].compute_amax(method=method, percentile=99.999)
                 min_v = -max_v
                 self.__scales[key] = dict(min=min_v.numpy(), max=max_v.numpy(), zeros_point=0)  
