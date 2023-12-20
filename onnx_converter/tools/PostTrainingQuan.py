@@ -178,6 +178,8 @@ class HistogramCalibrator(object):
     """
     def __init__(self, num_bits=8, axis=None, unsigned=True, num_bins=2048, grow_method=None, skip_zeros=False, torch_hist=False):
         super(HistogramCalibrator, self).__init__()
+        self._unsigned = unsigned
+        self._num_bits = num_bits
         self._num_bins = num_bins
         self._skip_zeros = skip_zeros
 
@@ -649,9 +651,10 @@ class PostTrainingQuan(Object): # type: ignore
                     if key not in HistogramCalibrators.keys():
                         HistogramCalibrators[key] = HistogramCalibrator()
                     HistogramCalibrators[key].collect(scales[key])
-            
-            for key in HistogramCalibrators.keys():
-                max_v = HistogramCalibrators[key].compute_amax(method='entropy') # ['entropy', 'mse', 'percentile']
+                # break
+            method = 'percentile'  # ['entropy', 'mse', 'percentile']
+            for key in tqdm(HistogramCalibrators.keys(), postfix=f'compute_amax use {method}') if self.is_stdout else HistogramCalibrators.keys():
+                max_v = HistogramCalibrators[key].compute_amax(method=method)
                 min_v = -max_v
                 scales_ = dict(min=min_v.numpy(), max=max_v.numpy(), zeros_point=0)  
                 self.__scales[key] = scales_
