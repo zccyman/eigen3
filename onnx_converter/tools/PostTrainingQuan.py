@@ -652,12 +652,11 @@ class PostTrainingQuan(Object): # type: ignore
                         HistogramCalibrators[key] = HistogramCalibrator()
                     HistogramCalibrators[key].collect(scales[key])
                 # break
-            method = 'percentile'  # ['entropy', 'mse', 'percentile']
+            method = 'mse'  # ['entropy', 'mse', 'percentile':99.999]
             for key in tqdm(HistogramCalibrators.keys(), postfix=f'compute_amax use {method}') if self.is_stdout else HistogramCalibrators.keys():
-                max_v = HistogramCalibrators[key].compute_amax(method=method)
+                max_v = HistogramCalibrators[key].compute_amax(method=method, percentile=99.999)
                 min_v = -max_v
-                scales_ = dict(min=min_v.numpy(), max=max_v.numpy(), zeros_point=0)  
-                self.__scales[key] = scales_
+                self.__scales[key] = dict(min=min_v.numpy(), max=max_v.numpy(), zeros_point=0)  
                 
             self.logger.info('end quantize datasets!')
         
