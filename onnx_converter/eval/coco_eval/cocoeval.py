@@ -509,8 +509,6 @@ class CocoEval(Eval): # type: ignore
         images_ = tqdm.tqdm(images, postfix='image files') if self.is_stdout else images
         for image_id, item in enumerate(images_):
             idx, image_name = item['id'], item['file_name']
-            # if image_id < 2000:
-            #         continue
             
             img = cv2.imread(os.path.join(dataset_path, image_name))
             if self.eval_mode == "single":

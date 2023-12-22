@@ -28,14 +28,14 @@ import random
 import json
     
 from .cvt2torch import CVT2TORCH
-from .torch2qat import TORCH2QAT, EMA
+from .torch2qat import TORCH2QAT, EMA, fake_quant
 
 import torch.nn.functional as F
 
 try:
-    from utils import Registry, RoundFunction, FloorFunction, ClampFunction
+    from utils import Registry, RoundFunction, FloorFunction, ClampFunction, FunLSQ
 except Exception:
-    from onnx_converter.utils import Registry, RoundFunction, FloorFunction, ClampFunction
+    from onnx_converter.utils import Registry, RoundFunction, FloorFunction, ClampFunction, FunLSQ
     
     
 seed = 0
@@ -58,6 +58,9 @@ torch.backends.cudnn.benchmark = False
 #     A.HueSaturationValue(p=0.2),
 # ])
     
+def is_subset(a, b):
+    return all(elem in b for elem in a)
+
     
 def batchify_list(lst, batch_size, is_trainning=True):
     new_list = [lst[i:i+batch_size] for i in range(0, len(lst), batch_size)]
@@ -186,6 +189,7 @@ class QAT_Module(nn.Module):
         self.postprocess = kwargs.get("postprocess")
         self.post_quan = kwargs.get("post_quan")
         self.update_so_by_ema = kwargs.get("update_so_by_ema")
+        self.already_debug_one_time = False
         
         self.sk_params_file = kwargs.get("sk_params_file")
         self.calibration_params_file = kwargs.get("calibration_params_file")
@@ -216,203 +220,217 @@ class QAT_Module(nn.Module):
             "hardswish": F.hardswish,
             "hardshrink": F.hardshrink,
         }
-                
+          
+        layer_num, layer_idx = -1, -1
         params = []
         for layer in self.layers:
             layer_type = layer.get_layer_type()
             layer_name = layer.get_layer_name()
+            process_scale = layer.get_scale_type()
             self.logger.info("rank {} initializing layer: {}, {}".format(self.rank, layer_type, layer_name))
-            # if layer_type in ["shuffle_only"]:
-                # print("test")
                 
             instance_devices, device_id = [], 0
-            if 1:
-                # device_string = "cuda:{}".format(device) 
-                device_string = "cpu"
-                activation = layer.get_layer_ops()["ops"][-1]
-                ema_sc = []
-                if layer_type in ["conv", "depthwiseconv", "convtranspose", "fc"]:
-                    if activation != "act":
-                        if calibration_params:
-                            conv_output_name = layer.get_nodes()[0].get_onnx_output()[0]
-                            dmax = calibration_params[conv_output_name]["max"]
-                            dmin = calibration_params[conv_output_name]["min"]
-                        else:                            
-                            dmax = layer.get_data_scale()[1]['max'].astype(np.float32)
-                            dmin = layer.get_data_scale()[1]['min'].astype(np.float32)
-                        ema_sc = [EMA(dmax=dmax, dmin=dmin, layer=layer, device=device_string)]  
-                        if 0 == device_id:
-                            for j, param in enumerate([ema_sc[0].dmin, ema_sc[0].dmax]):
-                                params.append({
-                                    "params": param,
-                                    "lr": ema_learning_rate,
-                                    "weight_decay": weight_decay,
-                                    "name": "sc",
-                                    "layer_name": layer_name,
-                                    "layer_type": layer_type,
-                                    "is_result_layer": layer.get_is_result_layer(),
-                                })                    
-                
-                if 0 == device_id:   
-                    # if 0: #len(ema_sc) > 0:
-                    #     dmax = activations[activation](ema_sc[0].dmax).detach().cpu().numpy()
-                    #     dmin = activations[activation](ema_sc[0].dmin).detach().cpu().numpy()
-                    #     ema_so = [EMA(dmax=dmax, dmin=dmin, layer=layer, device=device_string)]
-                    # else:
-                    
-                    ema_so = []
-                    for idx, onnx_output_name in enumerate(layer.get_onnx_output_name()):
-                        if calibration_params:
-                            dmax = calibration_params[onnx_output_name]["max"]
-                            dmin = calibration_params[onnx_output_name]["min"]
-                        else:                      
-                            dmax = layer.get_data_scale()[idx]['max'].astype(np.float32)
-                            dmin = layer.get_data_scale()[idx]['min'].astype(np.float32)
-                        ema_so.extend([EMA(dmax=dmax, dmin=dmin, layer=layer, device=device_string)])
-                    # ema_so = [EMA(dmax=dmax, dmin=dmin, layer=layer, device=device_string) for _ in layer.get_onnx_output_name()] 
-                        
-                    # if not (layer_type in ["data"] or layer.get_is_result_layer()):
-                    # if layer_type != "data":
-                    if 1:
-                        for instance in ema_so:
-                            for j, param in enumerate(instance.get_ema_params()):
-                                params.append({
-                                    "params": param,
-                                    "lr": ema_learning_rate,
-                                    "weight_decay": weight_decay,
-                                    "name": "so",
-                                    "layer_name": layer_name,
-                                    "layer_type": layer_type, 
-                                    "is_result_layer": layer.get_is_result_layer(),                                   
-                                })
-                                            
-                if layer_type == "data":
-                    ema_si = ema_so
-                else:
-                    ema_si = []
-                    prelayers = [
-                        self.layers[layer_idx]
-                        for layer_idx in layer.get_input_idx()
-                    ]
-                    for in_name in layer.get_onnx_input_name():
-                        for prelayer in prelayers:
-                            prelayer_out_names = prelayer.get_onnx_output_name()
-                            if in_name in prelayer_out_names:
-                                idx_selected = prelayer_out_names.index(in_name)
-                                ema_si_tmp = prelayer.get_ema()[1][idx_selected]
-                                ema_si.append(ema_si_tmp)
-                                
-                if layer.get_scale_type() in ["smooth"]:
-                    ema_so = ema_si
-                if len(ema_sc) == 0:
-                    ema_sc = ema_so                    
-                layer.set_ema(ema=[ema_si, ema_so, ema_sc])
-                
-                torch_instance = CVT2TORCH.get(layer_type)(
-                    layer=layer,
-                    requires_grad=False,
-                    qat_nofakequant=False,
-                    device=device_string,
-                )
-                qat_instance = TORCH2QAT.get(layer_type)(
-                    layer=layer,
-                    requires_grad=True,
-                    qat_nofakequant=False,
-                    device=device_string,
-                )
-                if layer_type in [
-                        "conv",
-                        "depthwiseconv",
-                        "convtranspose",
-                        "fc",
-                        "gemm",
-                        "matmul",
-                ]:
-                    if 0 == device_id:
-                        param = qat_instance.get_params()[:1]
-                        for j, p in enumerate(param):
-                            params.append({
-                                "params": p,
-                                "lr": self.max_learning_rate,
-                                "weight_decay": weight_decay,
-                                "name": "weight",
-                                "layer_name": layer_name,
-                                "layer_type": layer_type, 
-                                "is_result_layer": layer.get_is_result_layer(),
-                            }
-                        )
-                        
-                        param = qat_instance.get_params()[1:]
-                        for j, p in enumerate(param):
-                            params.append({
-                                "params": p,
-                                "lr": self.max_learning_rate,
-                                "weight_decay": weight_decay,
-                                "name": "bias",
-                                "layer_name": layer_name,
-                                "layer_type": layer_type, 
-                                "is_result_layer": layer.get_is_result_layer(),                                
-                            }
-                        )
+            device_string = "cpu"
+            activation = layer.get_layer_ops()["ops"][-1]
+            ema_sc = []
+            if layer_type in ["conv", "depthwiseconv", "convtranspose", "fc"]:
+                if activation != "act":
+                    if calibration_params:
+                        conv_output_name = layer.get_nodes()[0].get_onnx_output()[0]
+                        dmax = calibration_params[conv_output_name]["max"] #/ np.sqrt(127.0)
+                        dmin = calibration_params[conv_output_name]["min"] #/ np.sqrt(127.0)
+                    else:                            
+                        dmax = layer.get_data_scale()[1]['max'].astype(np.float32) #/ np.sqrt(127.0)
+                        dmin = layer.get_data_scale()[1]['min'].astype(np.float32) #/ np.sqrt(127.0)
+                    ema_sc = [EMA(dmax=dmax, dmin=dmin, device=device_string)]  
+            ema_so = []
+            for idx, onnx_output_name in enumerate(layer.get_onnx_output_name()):
+                if calibration_params:
+                    dmax = calibration_params[onnx_output_name]["max"] #/ np.sqrt(127.0)
+                    dmin = calibration_params[onnx_output_name]["min"] #/ np.sqrt(127.0)
+                else:                      
+                    dmax = layer.get_data_scale()[idx]['max'].astype(np.float32) #/ np.sqrt(127.0)
+                    dmin = layer.get_data_scale()[idx]['min'].astype(np.float32) #/ np.sqrt(127.0)
+                ema_so.extend([EMA(dmax=dmax, dmin=dmin, device=device_string)])
+                                        
+            if layer_type == "data":
+                ema_si = ema_so
+            else:
+                # if layer.get_layer_name() in ["/backbone/stage2/stage2.1/branch2/branch2.0/Conv"]:
+                    # print("test")
+                ema_si = []
+                prelayers = [
+                    self.layers[layer_idx]
+                    for layer_idx in layer.get_input_idx()
+                ]
+                for in_name in layer.get_onnx_input_name():
+                    for prelayer in prelayers:
+                        prelayer_out_names = prelayer.get_onnx_output_name()
+                        if in_name in prelayer_out_names:
+                            idx_selected = prelayer_out_names.index(in_name)
+                            ema_si_tmp = prelayer.get_ema()[1][idx_selected]
+                            ema_si.append(ema_si_tmp)
                             
-                        param = qat_instance.get_alpha_params()
-                        for j, p in enumerate(param):
-                            params.append({
-                                "params": p,
-                                "lr": ema_learning_rate,
-                                "weight_decay": 0.0,
-                                "name": "alpha",
-                                "layer_name": layer_name,
-                                "layer_type": layer_type,  
-                                "is_result_layer": layer.get_is_result_layer(),                               
-                            }
-                        )
+            if process_scale in ["smooth"] and layer_type not in ["globalaveragepool"]:
+                ema_so = ema_si
+            else:
+                layer_num += 1
+                layer_idx += 1                
+                for instance in ema_so:
+                    for j, param in enumerate(instance.get_ema_params()):
+                        params.append({
+                            "params": param,
+                            "lr": ema_learning_rate,
+                            "weight_decay": weight_decay,
+                            "name": "so",
+                            "layer_num": layer_num,
+                            "layer_idx": layer_idx,
+                            "layer_name": layer_name,
+                            "layer_type": layer_type, 
+                            "process_scale": process_scale,
+                            "is_result_layer": layer.get_is_result_layer(),                                   
+                        })                     
+            if len(ema_sc) == 0:
+                ema_sc = ema_so    
+            else:
+                for j, param in enumerate([ema_sc[0].dmin, ema_sc[0].dmax]):
+                    params.append({
+                        "params": param,
+                        "lr": ema_learning_rate,
+                        "weight_decay": weight_decay,
+                        "name": "sc",
+                        "layer_num": layer_num,
+                        "layer_idx": layer_idx,
+                        "layer_name": layer_name,
+                        "layer_type": layer_type,
+                        "process_scale": process_scale,
+                        "is_result_layer": layer.get_is_result_layer(),
+                    })                                     
+            layer.set_ema(ema=[ema_si, ema_so, ema_sc])
+            
+            torch_instance = CVT2TORCH.get(layer_type)(
+                layer=layer,
+                requires_grad=False,
+                qat_nofakequant=False,
+                device=device_string,
+            )
+            qat_instance = TORCH2QAT.get(layer_type)(
+                layer=layer,
+                requires_grad=True,
+                qat_nofakequant=False,
+                device=device_string,
+            )
+            if layer_type in [
+                    "conv",
+                    "depthwiseconv",
+                    "convtranspose",
+                    "fc",
+                    "gemm",
+                    "matmul",
+            ]:
+                if 0 == device_id:
+                    param = qat_instance.get_params()[:1]
+                    for j, p in enumerate(param):
+                        params.append({
+                            "params": p,
+                            "lr": self.max_learning_rate,
+                            "weight_decay": weight_decay,
+                            "name": "weight",
+                            "layer_num": layer_num,
+                            "layer_idx": layer_idx,
+                            "layer_name": layer_name,
+                            "layer_type": layer_type, 
+                            "process_scale": process_scale,
+                            "is_result_layer": layer.get_is_result_layer(),
+                        }
+                    )
+                    
+                    param = qat_instance.get_params()[1:]
+                    for j, p in enumerate(param):
+                        params.append({
+                            "params": p,
+                            "lr": self.max_learning_rate,
+                            "weight_decay": weight_decay,
+                            "name": "bias",
+                            "layer_num": layer_num,
+                            "layer_idx": layer_idx,
+                            "layer_name": layer_name,
+                            "layer_type": layer_type, 
+                            "process_scale": process_scale,
+                            "is_result_layer": layer.get_is_result_layer(),                                
+                        }
+                    )
                         
-                        param = qat_instance.get_beta_params()
-                        for j, p in enumerate(param):
-                            params.append({
-                                "params": p,
-                                "lr": ema_learning_rate,
-                                "weight_decay": 0.0,
-                                "name": "beta",
-                                "layer_name": layer_name,
-                                "layer_type": layer_type,  
-                                "is_result_layer": layer.get_is_result_layer(),                               
-                            }
-                        )
-                                                                                
-                        param = qat_instance.get_hv_params()
-                        for j, p in enumerate(param):
-                            params.append({
-                                "params": p,
-                                "lr": ema_learning_rate,
-                                "weight_decay": 0.0,
-                                "name": "hv",
-                                "layer_name": layer_name,
-                                "layer_type": layer_type,  
-                                "is_result_layer": layer.get_is_result_layer(),                               
-                            }
-                        )
-                        
-                        if sk_params:
-                            sk_dmax = sk_params.get(layer_name)
-                            sk_dmax = torch.tensor(sk_dmax)
-                            qat_instance.set_sk_params(sk_dmax)                        
-                        param = qat_instance.get_sk_params()
-                        for j, p in enumerate(param):
-                            params.append({
-                                "params": p,
-                                "lr": ema_learning_rate,
-                                "weight_decay": weight_decay,
-                                "name": "sk",
-                                "layer_name": layer_name,
-                                "layer_type": layer_type, 
-                                "is_result_layer": layer.get_is_result_layer(),                               
-                            }
-                        )
+                    param = qat_instance.get_alpha_params()
+                    for j, p in enumerate(param):
+                        params.append({
+                            "params": p,
+                            "lr": ema_learning_rate,
+                            "weight_decay": weight_decay,
+                            "name": "alpha",
+                            "layer_num": layer_num,
+                            "layer_idx": layer_idx,
+                            "layer_name": layer_name,
+                            "layer_type": layer_type,  
+                            "process_scale": process_scale,
+                            "is_result_layer": layer.get_is_result_layer(),                               
+                        }
+                    )
+                    
+                    param = qat_instance.get_beta_params()
+                    for j, p in enumerate(param):
+                        params.append({
+                            "params": p,
+                            "lr": ema_learning_rate,
+                            "weight_decay": weight_decay,
+                            "name": "beta",
+                            "layer_num": layer_num,
+                            "layer_idx": layer_idx,
+                            "layer_name": layer_name,
+                            "layer_type": layer_type,  
+                            "process_scale": process_scale,
+                            "is_result_layer": layer.get_is_result_layer(),                               
+                        }
+                    )
+                                                                            
+                    param = qat_instance.get_hv_params()
+                    for j, p in enumerate(param):
+                        params.append({
+                            "params": p,
+                            "lr": ema_learning_rate,
+                            "weight_decay": 0.0,
+                            "name": "hv",
+                            "layer_num": layer_num,
+                            "layer_idx": layer_idx,
+                            "layer_name": layer_name,
+                            "layer_type": layer_type,  
+                            "process_scale": process_scale,
+                            "is_result_layer": layer.get_is_result_layer(),                               
+                        }
+                    )
+                    
+                    if sk_params:
+                        sk_dmax = sk_params.get(layer_name)
+                        sk_dmax = torch.tensor(sk_dmax)
+                        qat_instance.set_sk_params(sk_dmax)                        
+                    param = qat_instance.get_sk_params()
+                    for j, p in enumerate(param):
+                        params.append({
+                            "params": p,
+                            "lr": ema_learning_rate,
+                            "weight_decay": weight_decay,
+                            "name": "sk",
+                            "layer_num": layer_num,
+                            "layer_idx": layer_idx,
+                            "layer_name": layer_name,
+                            "layer_type": layer_type, 
+                            "process_scale": process_scale,
+                            "is_result_layer": layer.get_is_result_layer(),                               
+                        }
+                    )
 
-                instance = [torch_instance, qat_instance]
-                instance_devices.extend(instance)
+            instance = [torch_instance, qat_instance]
+            instance_devices.extend(instance)
             layer.set_adaround(instance_devices)
 
         self.qat_params = params
@@ -438,7 +456,7 @@ class QAT_Module(nn.Module):
         qat_fearuremap = {input_name[0]: out_data_qat}
             
         is_debug = False
-        if out_data_torch.shape[0] == 1:
+        if out_data_torch.shape[0] == 1 and not self.already_debug_one_time:
             is_debug = True
         if is_debug:    
             ort_in_data = out_data_torch.cpu().detach().numpy()[0].transpose(1, 2, 0)
@@ -492,74 +510,101 @@ class QAT_Module(nn.Module):
                 # if is_trainning:
                     # qat_instance.ema_so[idx](qat_fearuremap[output_name].detach())
                 if is_debug:
-                    print(output_name, torch_fearuremap[output_name].sum(), true_outputs[output_name].sum())
+                    self.logger.info("debug: {}, {}, {}".format(output_name, torch_fearuremap[output_name].sum().item(), true_outputs[output_name].sum().item()))
+
+                # middle_layer_loss += F.mse_loss(
+                #     layer.get_ema()[1][idx].get_scale(), 
+                #     (2 * torch.mean(torch.abs(qat_fearuremap[output_name])) / 127.0).detach(),
+                #     reduction='mean',
+                # )
                 if layer.get_is_result_layer():
-                    loss_fn = FeatureMapLoss(loss_type='l1', hard_ratio=hard_ratio)
+                    # loss_fn = FeatureMapLoss(loss_type='mse', hard_ratio=hard_ratio)
                     loss_weight = 1
-                    result_layer_loss += loss_weight * loss_fn(
+                    result_layer_loss += loss_weight * F.mse_loss(
                         qat_fearuremap[output_name],
-                        torch_fearuremap[output_name],
+                        torch_fearuremap[output_name].detach(),
+                        reduction="mean",
                     )
                     result_layer_num += 1.0  
-                    
-                    # trans = self.preprocess.get_trans()
-                    # outputs_qat = self.postprocess(
-                    #     dict(output=qat_fearuremap[output_name]),
-                    #     trans=trans,
-                    # )
-                    # outputs_torch = self.postprocess(
-                    #     dict(output=torch_fearuremap[output_name]),
-                    #     trans=trans,
-                    # )                    
-                    # kpt_qat, score_qat = outputs_qat[:, -1:], outputs_qat[:, :-1]  
-                    # kpt_torch, score_torch = outputs_torch[:, -1:], outputs_torch[:, :-1] 
-                    # kpt_loss = torch.abs(kpt_qat - kpt_torch) / torch.abs(kpt_torch)
-                    # result_layer_loss += kpt_loss.mean()
-                    # score_loss = torch.abs(score_qat - score_torch)
-                    # result_layer_loss += score_loss.mean()
-                    # result_layer_num += 1.0  
-                                                             
-                # elif layer_type in ["data"]:
-                # # else:
+                else:
+                # elif is_trainning:
                 #     loss_weight = 1
                 #     loss_fn = FeatureMapLoss(loss_type='l1', hard_ratio=hard_ratio)
                 #     middle_layer_loss += loss_weight * loss_fn(
                 #         qat_fearuremap[output_name],
                 #         torch_fearuremap[output_name],
-                #     ) * 1.0e-2
-                #     middle_layer_num += 1.0
+                #     )
+                    middle_layer_num += 1.0
                 
             #### not layer.get_is_result_layer() and 
             if layer_type in ["conv", "depthwiseconv", "convtranspose", "fc"]:
-                txme_clip = qat_instance.get_txme_clip()
-                if layer_name in txme_clip_dict.keys():
-                    txme_clip_dict[layer_name] += txme_clip
-                else:
-                    txme_clip_dict[layer_name] = txme_clip
-                txme_clip_list.append(txme_clip)
+                # txme_clip = qat_instance.get_txme_clip()
+                # if layer_name in txme_clip_dict.keys():
+                #     txme_clip_dict[layer_name] += txme_clip
+                # else:
+                #     txme_clip_dict[layer_name] = txme_clip
+                # txme_clip_list.append(txme_clip)
                 weight_layer_num += 1.0
                 
-                txme_clip_scale = qat_instance.get_txme_scale()["scale"]
-                txme_clip_scale_list.append(txme_clip_scale)
+                # txme_clip_scale = qat_instance.get_txme_scale()["scale"]
+                # txme_clip_scale_list.append(txme_clip_scale)
                 
                 device = qat_instance.get_device()
-                param = qat_instance.get_hv_params()[0].to(device)
-                param = ClampFunction.apply(
-                        param, 
-                        torch.Tensor([0.0]).to(device), 
-                        torch.Tensor([1.0]).to(device),
-                )
-                loss_hv_regular += (-4 * param * param + 4 * param).mean()
+                # param = qat_instance.get_hv_params()[0].to(device)
+                # param = ClampFunction.apply(
+                #         param, 
+                #         torch.Tensor([-1.0]).to(device), 
+                #         torch.Tensor([1.0]).to(device),
+                # )
+                # loss_hv_regular += (-4.0 * param.abs() * (param.abs() - 1)).mean()
+                # loss_hv_regular += (-4.0 * param * (param - 1) * (param >= 0) - 4.0 * param * (param + 1) * (param < 0)).mean()
+                # loss_hv_regular += (16.0 / 3.0) * ((param ** 2) - (param ** 4)).mean()
+                # loss_hv_regular += (-4 * param * param + 4 * param).mean()
+                # loss_hv_regular += (-1.0 * param * param + 1.0).mean()
+                # loss_hv_regular += ((param ** 2 - 1) ** 2).mean()
+                # loss_hv_regular += torch.argmax(F.softmax(param, dim=-1), dim=-1).max()
+                # loss_hv_regular += torch.exp(param).max()
                 
+                # weight = torch.add(qat_instance.get_params()[0].to(device), qat_instance.get_alpha_params()[0].to(device))
                 weight = qat_instance.get_params()[0].to(device)
-                qweight = qat_instance.apply_fake_quant(weight, is_training=False)
-                loss_fn_l1 = FeatureMapLoss(loss_type='l1w', hard_ratio=hard_ratio)
-                loss_w_l1 += loss_fn_l1(qweight, weight.detach())
-                      
-        # middle_layer_loss /= middle_layer_num
-        result_layer_loss /= result_layer_num
-        
+                # sk = qat_instance.get_sk_params()[0] / 127.0
+                # qweight = fake_quant(weight, scale=sk, num_bits=8)
+                # qweight = qat_instance.apply_fake_quant(weight, is_training=False)
+                # sk = qat_instance.get_sk_params()[0] / 127.0
+                # qw = quant(weight, scale=sk, num_bits=8)   
+                # qw = torch.round(weight / sk).clamp(-128, 127)             
+                # loss_fn_l1 = FeatureMapLoss(loss_type='l1w', hard_ratio=hard_ratio)
+                # loss_var = 0.0 
+                # for v in range(-128, 128):
+                #     selected_indices = torch.where(qw == v)
+                #     v_selected = weight[selected_indices]
+                #     v_selected_q = qweight[selected_indices]                    
+                #     if v_selected.numel() > 1:
+                #         loss_var += v_selected.var() ### (v-v_mean)**2 / N
+                #         loss_var += F.mse_loss(v_selected_q, v_selected, reduction='mean').mean()
+                # loss_w_l1 += loss_var / 256.0
+                # loss_w_l1 += F.mse_loss(
+                #     torch.max(torch.abs(weight)) / 127.0, 
+                #     (2 * torch.mean(torch.abs(weight)) / 127.0).detach(),
+                #     reduction='mean')
+                # loss_w_l1 += F.mse_loss(
+                #     qat_instance.get_sk_params()[0].to(device) / 127.0, 
+                #     (2 * torch.mean(torch.abs(weight)) / 127.0).detach(), 
+                #     reduction='mean')
+                # loss_w_l1 += F.mse_loss(qweight, weight, reduction='mean')
+                loss_w_l1 += (weight ** 2).mean()
+                bias = qat_instance.get_params()[1].to(device)
+                loss_w_l1 += (bias ** 2).mean()
+              
+        result_layer_loss /= result_layer_num  
+        # middle_layer_loss /= (middle_layer_num + result_layer_num)
+                            
+        # if is_trainning:
+        #     middle_layer_loss /= middle_layer_num
+        # else:
         middle_layer_loss = 0.0 * result_layer_loss
+        
+        # middle_layer_loss = 0.0 * result_layer_loss
         # txme_clip = 0.0 * result_layer_loss
         # loss_w_l1 = 0.0 * result_layer_loss
         loss_hv_regular = 0.0 * result_layer_loss
@@ -573,9 +618,12 @@ class QAT_Module(nn.Module):
             if a > 0.0:
                 txme_clip_list_tmp.append(a)
                 txme_clip_scale_list_tmp.append(b)
-        txme_clip = torch.stack(txme_clip_list_tmp).mean()    
-        txme_clip_scale = torch.stack(txme_clip_scale_list_tmp).mean()
+        txme_clip = torch.tensor(0) # torch.stack(txme_clip_list_tmp).mean()    
+        txme_clip_scale = torch.tensor(0) # torch.stack(txme_clip_scale_list_tmp).mean()
         
+        if is_debug:
+            self.already_debug_one_time = True
+            
         return result_layer_loss, middle_layer_loss, loss_w_l1, loss_hv_regular, txme_clip, txme_clip_scale, txme_clip_dict
     
                 
@@ -636,28 +684,30 @@ def save_model(
         txme_param["layer_type"] = layer_type
         txme_param["process_scale"] = layer.get_scale_type()
         txme_param["layer_idx"] = layer.get_idx()
-        txme_param["input_idx"] = layer.get_input_idx() 
-        txme_param["output_idx"] = layer.get_output_idx()        
+        txme_param["input_idx"] = layer.get_input_idx()
+        txme_param["input_name"] = layer.get_input_name()
+        txme_param["output_idx"] = layer.get_output_idx()
+        txme_param["output_name"] = layer.get_output_name()        
         if layer_type in layer_types_with_weights:
             weight, bias = qat_instance.get_weights()
             layer.set_layer_ops(dict(weights=[weight, bias]))
             sk_params[layer_name] = torch.abs(qat_instance.get_sk_params()[0]).detach().cpu().numpy().tolist()
             
-            txme_param["alpha"] = qat_instance.get_alpha_params()[0].max().item()
-            txme_param["beta"] = qat_instance.get_beta_params()[0].max().item()
-            txme_param["txme_clip"] = txme_clip_dict[layer_name].item() #qat_instance.get_txme_clip().item()
+            # txme_param["alpha"] = qat_instance.get_alpha_params()[0].max().item()
+            # txme_param["beta"] = qat_instance.get_beta_params()[0].max().item()
+            # txme_param["txme_clip"] = txme_clip_dict[layer_name].item() #qat_instance.get_txme_clip().item()
             txme_param["si"] = ema_si[0].get_scale().item() * 127.0
             txme_param["sk"] = sk_params[layer_name]
             txme_param["sc"] = ema_sc[0].get_scale().item() * 127.0
             txme_param["so"] = ema_so[0].get_scale().item() * 127.0
-            txme_param["out_shift"] = qat_instance.get_txme_scale()["out_shift"]
-            txme_param["out_scale"] = qat_instance.get_txme_scale()["out_scale"]
+            # txme_param["out_shift"] = qat_instance.get_txme_scale()["out_shift"]
+            # txme_param["out_scale"] = qat_instance.get_txme_scale()["out_scale"]
             txme_params[layer_name] = txme_param
         elif layer_type in ["add", "concat", "split"]:
             txme_param["si"] = [s.get_scale().item() * 127.0 for s in ema_si]
             txme_param["so"] = [s.get_scale().item() * 127.0 for s in ema_so]             
-            txme_param["scale"] = [v.item() for v in qat_instance.get_scale_shift()["scale"]]
-            txme_param["int_scale"] = [v for v in qat_instance.get_scale_shift()["shift"]]
+            # txme_param["scale"] = [v.item() for v in qat_instance.get_scale_shift()["scale"]]
+            # txme_param["int_scale"] = [v for v in qat_instance.get_scale_shift()["shift"]]
             txme_params[layer_name] = txme_param
         else:
             txme_param["si"] = [s.get_scale().item() * 127.0 for s in ema_si]
@@ -769,6 +819,7 @@ def train(rank, world_size, datasets, datasets_eval, kwargs):
     qat_params = []
     for i, qat_param in enumerate(model.qat_params):
         qat_param['params'].requires_grad = True
+        layer_num = qat_param["layer_num"]
         qat_params.append(qat_param)
             
     optimizer = torch.optim.Adam(
@@ -783,6 +834,9 @@ def train(rank, world_size, datasets, datasets_eval, kwargs):
     else:
         in_data_list = get_datasets(datasets, preprocess)
     
+    epoch_per_layer = 1
+    # epochs = epoch_per_layer * (layer_num + 2)
+    layer_idx = 0
     min_avg_loss = dict(loss=1000, epoch=0)                                                                   
     for epoch in tqdm(range(epochs), postfix='current epoch index of qat'): 
         # in_data_list = []
@@ -796,7 +850,9 @@ def train(rank, world_size, datasets, datasets_eval, kwargs):
         #     in_data_list.append(in_data)
                     
         #### evaluation and save onnx model
-        if (save_onnx_interval == 1) or (epoch == 0 or epoch % save_onnx_interval == 0 or epoch == epochs - 1):
+        # if (save_onnx_interval == 1) or (epoch == 0 or epoch % save_onnx_interval == 0 or epoch == epochs - 1):
+        if epoch == epochs - 1 or epoch == 0 or epoch % 10 == 0:
+        # if 0:
             logger.info("start evaluation ...")
             
             avg_loss = []
@@ -813,7 +869,7 @@ def train(rank, world_size, datasets, datasets_eval, kwargs):
                     result_layer_loss, middle_layer_loss, loss_w_l1, loss_hv_regular, txme_clip, txme_clip_scale, txme_clip_dict_tmp = model(
                         in_data, device=torch.device(f"cuda:{rank}"), is_trainning=False)
                     avg_loss.append(result_layer_loss.mean())   
-                    avg_txme_clip.append(txme_clip.mean())
+                    # avg_txme_clip.append(txme_clip.mean())
                     
                     for key in txme_clip_dict_tmp.keys():
                         if key in txme_clip_dict.keys():
@@ -825,23 +881,32 @@ def train(rank, world_size, datasets, datasets_eval, kwargs):
                             txme_clip_dict[key] /= len(indices)
                             
             avg_loss_tmp = torch.stack(avg_loss).mean()
-            avg_txme_clip_tmp = torch.stack(avg_txme_clip).mean()
+            # avg_txme_clip_tmp = torch.stack(avg_txme_clip).mean()
             if avg_loss_tmp < min_avg_loss["loss"]:
                 min_avg_loss["loss"] = avg_loss_tmp
                 min_avg_loss["epoch"] = epoch
                 is_best_model = True
             else:
                 is_best_model = False
-                        
+            # max_txme_clip = 0.0
+            # layer_name = ''
+            # for layer_name_ in txme_clip_dict.keys():
+            #     if txme_clip_dict[layer_name_] > max_txme_clip:
+            #         layer_name = layer_name_ 
+            #         max_txme_clip = txme_clip_dict[layer_name_]  
+            # layer_name, max_txme_clip = sorted(txme_clip_dict.items(), key=lambda x: x[1], reverse=True)[0]
+                                        
             logger.info(
-                "test, rank: {}, epoch: {}, avg_loss: {:.8f}, min_avg_loss: {:.8f}, best_result_epoch: {}, avg_txme_clip: {:.8f}\n"
+                "test, rank: {}, epoch: {}, avg_loss: {:.8f}, min_avg_loss: {:.8f}, best_result_epoch: {}\n"
                 .format(
                     rank,
                     epoch,
                     avg_loss_tmp, # type: ignore
                     min_avg_loss["loss"],
                     min_avg_loss["epoch"],
-                    avg_txme_clip_tmp,
+                    # avg_txme_clip_tmp,
+                    # max_txme_clip,
+                    # layer_name,
                 )
             )
                                                  
@@ -873,21 +938,43 @@ def train(rank, world_size, datasets, datasets_eval, kwargs):
                 T_max=total_iters,  # Maximum number of iterations.
                 eta_min=min_learning_rate,  # Minimum learning rate. # type: ignore
             )
-                                        
-        # j = 0
+              
+        keyword_params_ = {
+            "0": ["sk"],
+            "1": ["si", "sc", "so"],
+            "2": ["alpha"],
+            "3": ["beta"],
+            "4": ["ema_decay"],
+        } 
+        k = 0
+        keyword_params_cpy = dict()
+        for key in keyword_params_.keys():
+            if is_subset(keyword_params_[key], keyword_params):
+                keyword_params_cpy[str(k)] = keyword_params_[key]
+                k += 1
+        keyword_params_ = keyword_params_cpy
+            
+        if epoch % epoch_per_layer == 0 and epoch > 0:
+            layer_idx += 1
+        
+        print("layer_idx: ", layer_idx, "epoch: ", epoch)    
+        # continue
+                                     
+        j = 0
         avg_loss = []
         for iter, indice in enumerate(indices):
             iters = epoch * len(indices) + iter
+            # if iter > 1:
+                # break
             
-            # if iters % 2 == 0:
-            # # if 1:
-            #     requires_grad_sk = True
+            # if len(keyword_params_.keys()) == 1:
+            #     keyword_params_tmp = keyword_params_[str(0)]
             # else:
-            #     requires_grad_sk = False 
-                
+            #     keyword_params_tmp = keyword_params_[str(iters % len(keyword_params_.keys()))]
+
             requires_grad_sk = True
             for qat_param in qat_params:
-                if qat_param["name"] in keyword_params:
+                if qat_param["name"] in keyword_params:# and qat_param["layer_idx"] == layer_idx:
                     for param in qat_param["params"]:
                         param.requires_grad = requires_grad_sk
                 else:
@@ -895,9 +982,9 @@ def train(rank, world_size, datasets, datasets_eval, kwargs):
                         param.requires_grad = not requires_grad_sk
                                     
             # weight_layer_num = len([qat_param["params"] for qat_param in qat_params if qat_param["name"] == "sk"])
-            # for qat_param in qat_params:
+            # for i, qat_param in enumerate(qat_params):
             #     if qat_param["name"] in ["sk"]:
-            #         for i, param in enumerate(qat_param["params"]):
+            #         for param in qat_param["params"]:
             #             if i == j:
             #                 param.requires_grad = True
             #             else:
@@ -908,7 +995,20 @@ def train(rank, world_size, datasets, datasets_eval, kwargs):
             # j = j + 1
             # if j == weight_layer_num - 1:
             #     j = 0
-                                                                    
+                     
+            # requires_grad_sk = True
+            # layer_num = qat_params[0]["layer_num"]
+            # for qat_param in qat_params:
+            #     if qat_param["name"] in keyword_params and qat_param["layer_idx"] == j:
+            #         for param in qat_param["params"]:
+            #             param.requires_grad = requires_grad_sk
+            #     else:
+            #         for param in qat_param["params"]:
+            #             param.requires_grad = not requires_grad_sk
+            # j += 1
+            # if layer_num == j:
+            #     j = 0
+                                                                                    
             total_loss = 0.0
             in_data = [in_data_list[ix] for ix in indice]
             in_data = np.concatenate(in_data, axis=0)
@@ -916,17 +1016,20 @@ def train(rank, world_size, datasets, datasets_eval, kwargs):
                 in_data, device=torch.device(f"cuda:{rank}"), is_trainning=True)
             avg_loss.append(result_layer_loss.mean())   
                       
+            # layer_name, max_txme_clip = sorted(txme_clip_dict_tmp.items(), key=lambda x: x[1], reverse=True)[0]
+                                                                                                        
             total_loss += result_layer_loss.mean()
             # total_loss += middle_layer_loss.mean()
-            # total_loss += loss_w_l1.mean() * 1.0
-            # total_loss += loss_hv_regular.mean()
+            total_loss += loss_w_l1.mean() * 1.0e-3
+            # total_loss += loss_hv_regular.mean() * 1.0
             # total_loss += txme_clip.mean() * 1.0
+            # total_loss += max_txme_clip.mean() * 1.0
             # total_loss += txme_clip_scale.mean() * 1.0
             
             optimizer.zero_grad()
             total_loss.backward()
             optimizer.step()
-            scheduler.step()
+            # scheduler.step()
             
             # if iters % 100 == 0:
             #     writer.add_scalar("learning_rate", scheduler.get_last_lr()[0], iters)
@@ -934,9 +1037,13 @@ def train(rank, world_size, datasets, datasets_eval, kwargs):
             #     writer.add_scalar("loss_hv_regular", loss_hv_regular.mean().item(), iters)
                 
             if iters % frequency_pring_log == 0:
+                # for qat_param in qat_params:
+                #     for param in qat_param["params"]:
+                #         if param.requires_grad:
+                #             logger.info("iter: {}, layer_idx: {}, j: {}, requires_grad: true, {}, {}".format(iter, qat_param["layer_idx"], j - 1, qat_param["layer_name"], qat_param["name"]))
                 learning_rate = scheduler.get_last_lr()[0]
                 logger.info(
-                    "train, rank: {}, epoch: {}, iter: {}, iters: {}, batch_size: {}, result_layer_loss: {:.8f}, middle_layer_loss: {:.8f}, loss_w_l1: {:.8f}, loss_hv_regular: {:.8f}, txme_clip: {:.8f}, txme_clip_scale: {:.8f}, learning_rate: {:.8f}"
+                    "train, rank: {}, epoch: {}, iter: {}, iters: {}, batch_size: {}, result_layer_loss: {:.8f}, middle_layer_loss: {:.8f}, loss_w_l1: {:.8f}, loss_hv_regular: {:.8f}, learning_rate: {:.8f}"
                     .format(
                         rank,
                         epoch,
@@ -947,8 +1054,10 @@ def train(rank, world_size, datasets, datasets_eval, kwargs):
                         middle_layer_loss,
                         loss_w_l1,
                         loss_hv_regular,
-                        txme_clip,
-                        txme_clip_scale,
+                        # txme_clip,
+                        # txme_clip_scale,
+                        # max_txme_clip,
+                        # layer_name,                        
                         learning_rate,
                     )
                 )

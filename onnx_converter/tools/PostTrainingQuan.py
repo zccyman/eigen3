@@ -114,8 +114,8 @@ def _compute_amax_mse(calib_hist, calib_bin_edges, num_bits=8, unsigned=True, st
     if calib_bin_edges is None and calib_hist is None:
         return None
 
-    counts = torch.from_numpy(calib_hist[:]).float().cuda()
-    edges = torch.from_numpy(calib_bin_edges[:]).float().cuda()
+    counts = torch.from_numpy(calib_hist[:]).float()
+    edges = torch.from_numpy(calib_bin_edges[:]).float()
     centers = (edges[1:] + edges[:-1]) / 2
     max_value = 2.0 ** (num_bits - 1) - 1
     min_value = -2.0 ** (num_bits - 1)
@@ -132,14 +132,14 @@ def _compute_amax_mse(calib_hist, calib_bin_edges, num_bits=8, unsigned=True, st
 
         mse = ((quant_centers - centers)**2 * counts).mean()
 
-        mses.append(mse.cpu())
+        mses.append(mse)
         arguments.append(i)
 
     logging.debug("mses={}".format(mses))
     argmin = np.argmin(mses)
     calib_amax = centers[arguments[argmin]]
 
-    return calib_amax.cpu()
+    return calib_amax
 
 def _compute_amax_percentile(calib_hist, calib_bin_edges, percentile):
     """Returns amax that clips the percentile fraction of collected data"""
@@ -637,6 +637,39 @@ class PostTrainingQuan(Object): # type: ignore
                 scales = self.onnx_infer(name)
                 self.ema_scales(scales)
                 # self.MinMaxScales(scales, idx=idx+1)
+                idx += 1
+            self.logger.info('end quantize datasets!')
+        elif 0:
+            self.logger.info('start quantize datasets!')
+            idx = 0
+            for name in tqdm(datasets, postfix="quant datasets"):
+                if isinstance(name, str) and not os.path.exists(name):
+                    self.logger.info('file is not exists!')
+                    continue
+                scales = self.onnx_infer(name)
+                for key in scales.keys():
+                    bins = 2048
+                    calib_hist, calib_bin_edges = np.histogram(scales[key], bins=bins)
+                    # calib_hist = calib_hist / calib_hist.sum()
+                    # min_v, max_v = calib_bin_edges[0], calib_bin_edges[-1]
+                    # delta = (max_v - min_v) / bins
+                    # for k in range(bins):
+                    #     if calib_hist[k:].sum() > 0.9999:   
+                    #         if calib_hist[0] < calib_hist[-1]:
+                    #             min_v += delta
+                    #         else:
+                    #             max_v -= delta
+                    calib_hist_inv, calib_bin_edges_inv = calib_hist[::-1], calib_bin_edges[::-1]
+                    max_v = _compute_amax_percentile(calib_hist, calib_bin_edges, percentile=99.9999).numpy()
+                    min_v = _compute_amax_percentile(calib_hist_inv, calib_bin_edges_inv, percentile=99.9999).numpy()    
+                    # max_v = _compute_amax_entropy(calib_hist, calib_bin_edges).numpy()
+                    # min_v = _compute_amax_entropy(calib_hist_inv, calib_bin_edges_inv).numpy()                      
+                    if idx == 0:
+                        self.__scales[key] = dict(min=min_v, max=max_v, zeros_point=0)  
+                    else:
+                        beta = 0.99
+                        self.__scales[key]['min'] = beta * self.__scales[key]['min'] + (1.0 - beta) * min_v
+                        self.__scales[key]['max'] = beta * self.__scales[key]['max'] + (1.0 - beta) * max_v
                 idx += 1
             self.logger.info('end quantize datasets!')
         else:

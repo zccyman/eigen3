@@ -24,9 +24,10 @@ if is_fuse_linear_act:
 else:
     act.extend(["relu", "relu6", "relux", "act"])
 search_smaller_sk = False
-reload_sk_params = False # False | True
+reload_sk_params = True # False | True
 # sk_params_json_path = "sk_params_99.json"
-sk_params_json_path = "work_dir/hand_detection_weight/sk_params_260.json"
+# sk_params_json_path = "work_dir/qat/test_imagenet/sk_params_56.json"
+sk_params_json_path = "work_dir/qat/test_hand_detection/sk_params_340.json"
 maxs = {0: 255, 1: 127, 2: 65535, 3: 32767, 4: 4294967295, 5: 2147483647, 6: 1844674407370955161, 7: 9223372036854775807}
 mins = {0: 0, 1: -128, 2: 0, 3: -32768, 4: 0, 5: -2147483648, 6: 0, 7: -9223372036854775808}
 # maxs = {0: 127, 1: 127, 2: 32767, 3: 32767, 4: 2147483647, 5: 2147483647}

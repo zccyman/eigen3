@@ -752,41 +752,139 @@ def get_same_padding(in_size, kernel_size, stride, auto_pad="SAME_UPPER"):
     pad1 = pad_size - pad0
     return [pad0, pad1]
 
+
 class RoundFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x):
-        # ctx.save_for_backward(x)
-        return torch.round(x)
+    # @staticmethod
+    # # def forward(ctx, x, s=None, num_bits=8):
+    # def forward(ctx, x):
+    #     ctx.save_for_backward(x)
+    #     # ctx.QN = -2 ** (num_bits - 1)
+    #     # ctx.QP = 2 ** (num_bits - 1) - 1  
+    #     # if s is not None:
+    #     #     return torch.round(x / s)
+    #     # else:
+    #     return torch.round(x)
 
     @staticmethod
     def backward(ctx, grad_output):
-        # x, = ctx.saved_tensors
-        return grad_output
+        x, = ctx.saved_tensors
+        # QN = ctx.QN
+        # QP = ctx.QP        
+        grad_input = grad_output.clone()
+        # if s is not None:
+        #     q_x = x / s
+        #     indicate_small = (q_x < QN).float()
+        #     indicate_big = (q_x > QP).float()
+        #     indicate_middle = 1.0 - indicate_small - indicate_big # Thanks to @haolibai 
+        #     grad_s = (
+        #         (-q_x.round() / s) * grad_output * indicate_middle
+        #         # (-QN / s) * grad_output * indicate_small + \
+        #         # (-QP / s) * grad_output * indicate_big
+        #         ).mean().unsqueeze(dim=0)  
+        #     # grad_s = ((-q_x + q_x.round()) * grad_output).mean().unsqueeze(dim=0)
+        #     return grad_input, None, None
+        # else:
+        return grad_input
     
     
 class FloorFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x):
-        # ctx.save_for_backward(x)
-        return torch.floor(x)
+    # @staticmethod
+    # def forward(ctx, x):
+    #     ctx.save_for_backward(x)
+    #     # ctx.QN = -2 ** (num_bits - 1)
+    #     # ctx.QP = 2 ** (num_bits - 1) - 1    
+    #     # if s is not None:
+    #     #     return torch.floor(x / s)
+    #     # else:
+    #     return torch.floor(x)
 
     @staticmethod
     def backward(ctx, grad_output):
-        # x, = ctx.saved_tensors
-        return grad_output
+        x, = ctx.saved_tensors
+        # QN = ctx.QN
+        # QP = ctx.QP
+        grad_input = grad_output.clone()
+        # if s is not None:
+        #     q_x = x / s
+        #     indicate_small = (q_x < QN).float()
+        #     indicate_big = (q_x > QP).float()
+        #     indicate_middle = 1.0 - indicate_small - indicate_big # Thanks to @haolibai 
+        #     grad_s = (
+        #         (-q_x.floor() / s) * grad_output * indicate_middle 
+        #         # (-QN / s) * grad_output * indicate_small + \
+        #         # (-QP / s) * grad_output * indicate_big
+        #         ).mean().unsqueeze(dim=0)            
+        #     # grad_s = ((-q_x + q_x.floor()) * grad_output).mean().unsqueeze(dim=0)
+        #     return grad_input, None, None
+        # else:
+        return grad_input
     
-        
     
 class ClampFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x, min_val, max_val):
-        ctx.save_for_backward(x, min_val, max_val)
-        return torch.clamp(x, min_val, max_val)
+    # @staticmethod
+    # def forward(ctx, x, min_val, max_val):
+    #     ctx.save_for_backward(x, min_val, max_val)
+    #     return torch.clamp(x, min_val, max_val)
     
     @staticmethod
     def backward(ctx, grad_output):
         x, min_val, max_val = ctx.saved_tensors
         grad_input = grad_output.clone()
-        grad_input[(x < min_val) | (x > max_val)] = 0
+        grad_input[x < min_val] = 0
+        grad_input[x > max_val] = 0
         return grad_input, None, None
+    
+    
+class FunLSQ(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, weight, alpha, g, Qn, Qp):
+        assert alpha > 0, 'alpha = {}'.format(alpha)
+        ctx.save_for_backward(weight, alpha)
+        ctx.other = g, Qn, Qp
+        q_w = (weight / alpha).round().clamp(Qn, Qp)
+        w_q = q_w * alpha
+        return w_q
+
+    @staticmethod
+    def backward(ctx, grad_weight):
+        weight, alpha = ctx.saved_tensors
+        g, Qn, Qp = ctx.other
+        q_w = weight / alpha
+        indicate_small = (q_w < Qn).float()
+        indicate_big = (q_w > Qp).float()
+        # indicate_middle = torch.ones(indicate_small.shape).to(indicate_small.device) - indicate_small - indicate_big
+        indicate_middle = 1.0 - indicate_small - indicate_big # Thanks to @haolibai 
+        grad_alpha = ((indicate_small * Qn + indicate_big * Qp + indicate_middle * (
+                -q_w + q_w.round())) * grad_weight * g).sum().unsqueeze(dim=0)
+        grad_weight = indicate_middle * grad_weight
+        return grad_weight, grad_alpha, None, None, None    
+    
+    
+class QuantizeFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, w, s, num_bits):
+        ctx.save_for_backward(w, s)
+        QN = -2 ** (num_bits - 1)
+        QP = 2 ** (num_bits - 1) - 1        
+        ctx.QN = QN
+        ctx.QP = QP
+        return torch.round(w / s).clamp(QN, QP)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        w, s = ctx.saved_tensors
+        QN = ctx.QN
+        QP = ctx.QP
+
+        q_w = w / s
+        indicate_small = (q_w < QN).float()
+        indicate_big = (q_w > QP).float()
+        indicate_middle = 1.0 - indicate_small - indicate_big # Thanks to @haolibai 
+        
+        grad_w = indicate_middle * grad_output
+        grad_s = ((indicate_small * QN + indicate_big * QP + indicate_middle * (
+            -q_w + q_w.round())) * grad_output).sum().unsqueeze(dim=0)
+
+        return grad_w, grad_s, None, None
+
 

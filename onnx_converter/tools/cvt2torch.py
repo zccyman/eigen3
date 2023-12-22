@@ -6,9 +6,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 try:
-    from utils import Registry, RoundFunction, FloorFunction, ClampFunction
+    from utils import Registry, RoundFunction, FloorFunction, ClampFunction, FunLSQ
 except Exception:
-    from onnx_converter.utils import Registry, RoundFunction, FloorFunction, ClampFunction
+    from onnx_converter.utils import Registry, RoundFunction, FloorFunction, ClampFunction, FunLSQ
 
 CVT2TORCH: Registry = Registry("cvt2torch", scope="")
 
@@ -19,15 +19,15 @@ class TORCH_BASE(nn.Module):
         super(TORCH_BASE, self).__init__()
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(self.device)
-        self.layer = kwargs.get("layer", None)
-        self.process_scale = self.layer.get_scale_type()
+        # self.layer = kwargs.get("layer", None)
+        # self.process_scale = self.layer.get_scale_type()
         # self.device_master = kwargs.get("device_master", "cuda:0" if torch.cuda.is_available() else "cpu")
         # self.device_master = torch.device(self.device_master)
         
-        self.is_tranning = True
+        # self.is_tranning = True
         
-    def set_train_mode(self, is_trainning):
-        self.is_tranning = is_trainning if self.process_scale != 'smooth' else False
+    # def set_train_mode(self, is_trainning):
+        # self.is_tranning = is_trainning if self.process_scale != 'smooth' else False
                 
     def set_device(self, device):
         self.device = torch.device(device)
@@ -73,15 +73,32 @@ class TORCH_CONV2D(TORCH_BASE):
         #     self.sk = nn.Parameter(torch.max(torch.abs(self.weight) / 127.0), requires_grad=self.requires_grad)
         
         if self.requires_grad:
+            self.sign_w = torch.sign(self.weight)
+            # delta_w = torch.frac(self.weight / self.sk).abs()
+            ### torch.floor(torch.tensor(100.23))=100, delta = 0.23, 100 + delta = 100.23, sign = 1
+            ### torch.floor(torch.tensor(-100.23))=-101, delta = -0.23 + 1 = 0.77, -101 + delta = -100.23, sign = -1
             mu, sigma = copy.deepcopy(self.weight).mean(), copy.deepcopy(self.weight).std()
             neg_w = torch.abs(mu - 3 * sigma)
             pos_w = torch.abs(mu + 3 * sigma)
             dmax_init = torch.max(neg_w, pos_w)
-            dmax_init = torch.max(torch.abs(self.weight))
+            dmax_init = torch.max(torch.abs(self.weight)) 
+            # num_bits = 8
+            # QN = -2 ** (num_bits - 1)
+            # QP = 2 ** (num_bits - 1) - 1             
+            # dmax_init = torch.mean(torch.abs(self.weight)) * 2.0 #/ np.sqrt(127.0)
             self.sk_dmax = nn.Parameter(dmax_init, requires_grad=self.requires_grad)
             sk = torch.abs(self.sk_dmax) / 127.0
-            qw, qw_floor = self.weight / sk, FloorFunction.apply(self.weight / sk)
-            hv_init = (qw - qw_floor)
+            hv_init = torch.frac(self.weight / sk)
+            # qw, qw_floor = self.weight / sk, FloorFunction.apply(self.weight / sk)
+            # hv_init = (qw - qw_floor)
+            
+            # qw, qw_round = self.weight / sk, RoundFunction.apply(self.weight / sk)
+            # hv_init = (qw - qw_round)            
+            # hv_init = 4.0 * (hv_init - 0.25) * 0.0
+            # hv_init = torch.tanh(hv_init)
+            # hv_init = torch.tensor([0.3, 0.4, 0.3], dtype=torch.float32)
+            # hv_init = torch.log(hv_init)
+            # hv_init = hv_init.view(1, 1, 1, 1, 3).expand(list(self.weight.shape) + [3])
             self.hv = nn.Parameter(hv_init, requires_grad=self.requires_grad)
             self.alpha = nn.Parameter(torch.zeros(self.weight.shape), requires_grad=self.requires_grad)
             self.beta = nn.Parameter(torch.zeros(self.bias.shape), requires_grad=self.requires_grad)
@@ -104,16 +121,20 @@ class TORCH_CONV2D(TORCH_BASE):
             negative_slope = self.layer.get_layer_ops()['attrs'][-1]['alpha']
         else:
             negative_slope = 0.01
+        if self.act_type == "hardsigmoid":
+            alpha = self.layer.get_layer_ops()['attrs'][-1]['alpha']
+            beta = self.layer.get_layer_ops()['attrs'][-1]['beta']
+            
         self.myactivations = {
             "act": act,
             "relu": torch.nn.ReLU(),
             "relu6": torch.nn.ReLU6(),
-            "relux": torch.nn.ReLU6(),  #lamda x: ClampFunction.apply(x, 0, 6),
+            "relux": torch.nn.ReLU6(),  #lambda x: ClampFunction.apply(x, 0, 6),
             "leakyrelu": torch.nn.LeakyReLU(negative_slope=negative_slope),
             "sigmoid": torch.nn.Sigmoid(),
             "tanh": torch.nn.Tanh(),
             "swish": swish,
-            "hardsigmoid": F.hardsigmoid,
+            "hardsigmoid": lambda x: torch.clamp(alpha * x + beta, 0, 1),
             "hardtanh": F.hardtanh,
             "hardswish": F.hardswish,
             "hardshrink": F.hardshrink,
@@ -129,20 +150,27 @@ class TORCH_CONV2D(TORCH_BASE):
         weight = weight.to(self.device)
         weight = RoundFunction.apply(weight / sk)
         
-        # weight = FloorFunction.apply(weight / sk)
+        # cls = (torch.argmax(F.softmax(self.hv.to(self.device), dim=-1), dim=-1) - torch.Tensor([1.0]).to(self.device))
+        # print("cls: ", torch.abs(cls).sum().item())
+        # weight += cls
+        
+        # weight = FloorFunction.apply(weight.abs() / sk)
+        # weight = weight * self.sign_w.to(self.device)
         # if is_training:
         #     weight += ClampFunction.apply(
         #         self.hv.to(self.device), 
-        #         # RoundFunction.apply(self.hv.to(self.device)), 
-        #         torch.Tensor([0.0]).to(self.device), 
+        #         torch.Tensor([-1.0]).to(self.device), 
         #         torch.Tensor([1.0]).to(self.device),
         #     )
         # else:
         #     weight += ClampFunction.apply(
-        #         RoundFunction.apply(self.hv.to(self.device)), 
-        #         torch.Tensor([0.0]).to(self.device), 
+        #         # RoundFunction.apply(self.hv.to(self.device)), 
+        #         self.hv.to(self.device), 
+        #         torch.Tensor([-1.0]).to(self.device), 
         #         torch.Tensor([1.0]).to(self.device),
         #     )
+            # diff = torch.abs((weight * sk) - self.weight.to(self.device)).max()
+            # print(diff)
                         
         weight = ClampFunction.apply(
             weight, 
@@ -165,11 +193,15 @@ class TORCH_CONV2D(TORCH_BASE):
     def infer(self, in_data):
         if self.requires_grad:
             # self.sk_dmax = nn.Parameter(torch.max(torch.abs(self.weight)), requires_grad=False)
+            self.sk_dmax.data = torch.max(torch.abs(self.weight))
             self.sk = torch.abs(self.sk_dmax).to(self.device) / 127.0
             weight = self.weight.to(self.device)
-            weight = self.weight_add_offset(weight)
-            weight = self.apply_fake_quant(weight)
+            # weight = self.weight_add_offset(weight)
+            # self.sk_dmax.data = torch.max(torch.abs(weight))
+            # self.sk = torch.abs(self.sk_dmax).to(self.device) / 127.0   
+            # weight = self.apply_fake_quant(weight)
             # weight = self.apply_only_quant(weight)
+            weight = self.fake_quant(weight, self.sk, num_bits=8)
             
             # weight = RoundFunction.apply(weight / self.sk)
             # weight = ClampFunction.apply(
@@ -184,7 +216,7 @@ class TORCH_CONV2D(TORCH_BASE):
             #     torch.Tensor([2.0**31 - 1]).to(self.device),
             # ) * self.si * self.sk
             bias = self.bias.to(self.device)
-            bias = self.bias_add_offset(bias)
+            # bias = self.bias_add_offset(bias)
             bias = self.fake_quant(bias, self.si * self.sk, num_bits=32)
         else:
             if self.qat_nofakequant:
@@ -255,80 +287,50 @@ class TORCH_CONV2D(TORCH_BASE):
         #         if lower < out_scale < 1:
         #             return np.int32(shift), out_scale
 
-    def round_and_clamp(self, data, min_value=-128.0, max_value=127.0):
-        # data = RoundFunction.apply(data)
-        data = ClampFunction.apply(
-            data,
-            torch.Tensor([min_value]).to(data.device),
-            torch.Tensor([max_value]).to(data.device),
-        )
-        return data
-
-    def get_txme_clip(self):
-        return self.txme_clip
+    # def get_txme_clip(self):
+    #     return self.txme_clip
     
     def get_txme_scale(self):
         return dict(out_shift=self.out_shift, out_scale=self.out_scale, scale=self.scale_)
     
-    def forward(self, in_data, si=1.0, sk=1.0, so=1.0, fake_quant=None, quant=None, dequant=None):
-        self.si, self.so, self.fake_quant, self.only_quant, self.only_dequant = si, so, fake_quant, quant, dequant
+    def forward(self, in_data, si=1.0, sk=1.0, so=1.0, fake_quant=None, is_trainning=False):
+        self.si, self.so, self.fake_quant = si, so, fake_quant
 
         data = in_data[0].to(device=self.device)
-        # if self.requires_grad:
-            # data = self.only_quant(data, self.si)
-        
-        # w_bit_select = 1
-        # if w_bit_select == 1:
-        #     max_value, min_value = 2**7 - 1, -2**7
-        # else:
-        #     max_value, min_value = 2**15 - 1, -2**15
-        # def get_quan_data(data, scale, zero_point=0):
-        #     transformed_val = data.reshape(-1) / scale + zero_point
-        #     quantized = torch.round(transformed_val)
-        #     quantized = torch.clip(quantized, min_value, max_value)
-        #     return torch.reshape(quantized, data.shape)
-
-        # def get_dequan_data(data, scale, zero_point=0):
-        #     dequantize = (data.reshape(-1) - zero_point) * scale
-        #     return torch.reshape(dequantize, data.shape)
-        
-        # data = get_dequan_data(get_quan_data(data, self.si), self.si)
         
         if "pads" in self.attrs.keys():
             data = F.pad(data, self.padding, "constant", 0)
 
         pred = self.infer(data)
 
-        # pred = get_dequan_data(get_quan_data(pred, self.so), self.so)
-        
-        # if self.has_relu:
-            # pred = self.relu(pred)
-            
         if self.requires_grad:
             ema_sc = self.layer.get_ema()[-1]
             if len(ema_sc) > 0:
-                if self.is_tranning: self.ema_sc[0](pred) ### update scale
-                sc = ema_sc[0].get_scale().to(self.device)
-                self.scale_ = self.si * self.sk / sc
-                # scale_ = torch.min(scale_, torch.tensor(1.0).to(self.device))
-                shift, out_scale = self.get_scale_shift(self.scale_)
-                self.out_shift, self.out_scale = float(shift), float(out_scale.item())
-                pred = (2.0 ** shift) * RoundFunction.apply(pred / (self.si * self.sk))
-                # pred = (2.0 ** shift) * pred
-                pred_before_clip = RoundFunction.apply(pred)
-                pred = ClampFunction.apply(
-                    pred_before_clip,
-                    torch.Tensor([-2.0**7]).to(self.device),
-                    torch.Tensor([2.0**7-1.0]).to(self.device),) # int8
-                diff_x = torch.abs(pred - pred_before_clip)
-                if torch.sum(diff_x) > 0:
-                    self.txme_clip = torch.mean(diff_x[diff_x != 0])
-                else:
-                    self.txme_clip = 0.0 * torch.sum(diff_x)
-                # if self.out_shift == 0:
-                #    self.txme_clip += F.relu(out_scale - torch.Tensor([1.0]).to(self.device))
-                pred = pred * out_scale * sc
-                pred = self.fake_quant(pred, sc)
+                if is_trainning and self.act_type != 'act': 
+                    self.ema_sc[0](pred) ### update scale
+                    
+                if self.act_type != 'act':
+                    sc = ema_sc[0].get_scale().to(self.device)
+                    # self.scale_ = self.si * self.sk / sc
+                    # scale_ = torch.min(scale_, torch.tensor(1.0).to(self.device))
+                    # shift, out_scale = self.get_scale_shift(self.scale_)
+                    # self.out_shift, self.out_scale = float(shift), float(out_scale.item())
+                    # pred = (2.0 ** shift) * RoundFunction.apply(pred / (self.si * self.sk))
+                    # # pred = (2.0 ** shift) * pred
+                    # pred_before_clip = RoundFunction.apply(pred)
+                    # pred = ClampFunction.apply(
+                    #     pred_before_clip,
+                    #     torch.Tensor([-2.0**7]).to(self.device),
+                    #     torch.Tensor([2.0**7-1.0]).to(self.device),) # int8
+                    # diff_x = torch.abs(pred - pred_before_clip)
+                    # if torch.sum(diff_x) > 0:
+                    #     self.txme_clip = torch.mean(diff_x[diff_x != 0])
+                    # else:
+                    #     self.txme_clip = 0.0 * torch.sum(diff_x)
+                    # if self.out_shift == 0:
+                    #    self.txme_clip += F.relu(out_scale - torch.Tensor([1.0]).to(self.device))
+                    # pred = pred * out_scale * sc
+                    pred = self.fake_quant(pred, sc, num_bits=8)
                 
             # print(self.act_type, len(ema_sc))
                 

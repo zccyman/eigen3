@@ -7,12 +7,18 @@
 # @File     : graph_quan.py
 
 import glob
+import logging
 import os
 import copy
 import json
 import pickle
 import numpy as np
+import torch
 from tqdm import tqdm
+from collections import Counter
+import numpy as np
+from scipy.stats import entropy
+from absl import logging
 
 try:
     from utils import Object, flatten_list, get_scale_shift
@@ -24,6 +30,133 @@ from .data_quan import QUANTIZE as quantize_factory
 first_lstm_feat_int16_enable = False
 first_lstm_weight_int16_enable = False
 first_lstm_hidden_int16_enable = False
+
+def _compute_amax_entropy(calib_hist, calib_bin_edges, num_bits=8, unsigned=True, stride=1, start_bin=128):
+    """Returns amax that minimizes KL-Divergence of the collected histogram"""
+
+    # If calibrator hasn't collected any data, return none
+    if calib_bin_edges is None and calib_hist is None:
+        return None
+
+    def _normalize_distr(distr):
+        summ = np.sum(distr)
+        if summ != 0:
+            distr = distr / summ
+
+    bins = calib_hist[:]
+    bins[0] = bins[1]
+
+    total_data = np.sum(bins)
+
+    divergences = []
+    arguments = []
+
+    # we are quantizing to 128 values + sign if num_bits=8, nbins=256
+    nbins = 1 << (num_bits - 1 + int(unsigned))
+
+    starting = start_bin
+    stop = len(bins)
+
+    new_density_counts = np.zeros(nbins, dtype=np.float64)
+
+    for i in range(starting, stop + 1, stride):
+        new_density_counts.fill(0)
+        space = np.linspace(0, i, num=nbins + 1)
+        digitized_space = np.digitize(range(i), space) - 1
+
+        digitized_space[bins[:i] == 0] = -1
+
+        for idx, digitized in enumerate(digitized_space):
+            if digitized != -1:
+                new_density_counts[digitized] += bins[idx]
+
+        counter = Counter(digitized_space)
+        for key, val in counter.items():
+            if key != -1:
+                new_density_counts[key] = new_density_counts[key] / val
+
+        new_density = np.zeros(i, dtype=np.float64)
+        for idx, digitized in enumerate(digitized_space):
+            if digitized != -1:
+                new_density[idx] = new_density_counts[digitized]
+
+        total_counts_new = np.sum(new_density) + np.sum(bins[i:])
+        _normalize_distr(new_density)
+
+        reference_density = np.array(bins[:len(digitized_space)])
+        reference_density[-1] += np.sum(bins[i:])
+
+        total_counts_old = np.sum(reference_density)
+        if round(total_counts_new) != total_data or round(total_counts_old) != total_data:
+            raise RuntimeError("Count mismatch! total_counts_new={}, total_counts_old={}, total_data={}".format(
+                total_counts_new, total_counts_old, total_data))
+
+        _normalize_distr(reference_density)
+
+        ent = entropy(reference_density, new_density)
+        divergences.append(ent)
+        arguments.append(i)
+
+    divergences = np.array(divergences)
+    logging.debug("divergences={}".format(divergences))
+    last_argmin = len(divergences) - 1 - np.argmin(divergences[::-1])
+    calib_amax = calib_bin_edges[last_argmin * stride + starting]
+    calib_amax = torch.tensor(calib_amax.item()) #pylint: disable=not-callable
+
+    return calib_amax
+
+def _compute_amax_mse(calib_hist, calib_bin_edges, num_bits=8, unsigned=True, stride=1, start_bin=128):
+    """Returns amax that minimizes MSE of the collected histogram"""
+
+    # If calibrator hasn't collected any data, return none
+    if calib_bin_edges is None and calib_hist is None:
+        return None
+
+    counts = torch.from_numpy(calib_hist[:]).float().cuda()
+    edges = torch.from_numpy(calib_bin_edges[:]).float().cuda()
+    centers = (edges[1:] + edges[:-1]) / 2
+    max_value = 2.0 ** (num_bits - 1) - 1
+    min_value = -2.0 ** (num_bits - 1)
+    
+    mses = []
+    arguments = []
+
+    for i in range(start_bin, len(centers), stride):
+
+        amax = centers[i]
+        scale = amax / max_value
+        quant_centers = torch.round(centers / scale).clamp(min_value, max_value) * scale
+        # quant_centers = fake_tensor_quant(centers, amax, num_bits, unsigned)
+
+        mse = ((quant_centers - centers)**2 * counts).mean()
+
+        mses.append(mse.cpu())
+        arguments.append(i)
+
+    logging.debug("mses={}".format(mses))
+    argmin = np.argmin(mses)
+    calib_amax = centers[arguments[argmin]]
+
+    return calib_amax.cpu()
+
+def _compute_amax_percentile(calib_hist, calib_bin_edges, percentile=99.999):
+    """Returns amax that clips the percentile fraction of collected data"""
+
+    if percentile < 0 or percentile > 100:
+        raise ValueError("Invalid percentile. Must be in range 0 <= percentile <= 100.")
+
+    # If calibrator hasn't collected any data, return none
+    if calib_bin_edges is None and calib_hist is None:
+        return None
+
+    total = calib_hist.sum()
+    cdf = np.cumsum(calib_hist / total)
+    idx = np.searchsorted(cdf, percentile / 100)
+    calib_amax = calib_bin_edges[idx]
+    calib_amax = torch.tensor(calib_amax.item()) #pylint: disable=not-callable
+
+    return calib_amax
+
 
 def get_quant(quan_dict, quan_factory, dataset_scales, name):
     quan_method = quan_factory.get(quan_dict['method'])(bit_select=quan_dict['bit_select'],
@@ -1006,7 +1139,7 @@ class GrapQuantUpgrade(GraphQuant):
         # kwargs = dict(bit_select=self.bit_select, maxs=self.maxs, mins=self.mins, bit_dict=self.bit_dict)
         is_first_lstm_layer = True
         for idx, layer in enumerate(tqdm(self.get_layers(), postfix="quant feat")):
-            try:
+            if 1:
                 layer.set_inputs_names(self.__input_names)
                 # if layer.get_layer_type().lower() == 'depthwiseconv':
                 #     print('test')
@@ -1026,10 +1159,10 @@ class GrapQuantUpgrade(GraphQuant):
                     self.feature_process(layer, quan_dict, dataset_scales, quantize_factory, is_first_lstm_layer=is_first_lstm_layer)
                 if layer_type == "lstm":
                     is_first_lstm_layer = False
-            except:
-                error_info = "layer of {} quantize feature map wrong!".format(layer.get_layer_name())
-                print(error_info)
-                os._exit(-1)
+            # except:
+            #     error_info = "layer of {} quantize feature map wrong!".format(layer.get_layer_name())
+            #     print(error_info)
+            #     os._exit(-1)
 
     # update feat quantize length or method
     # layer idx as the key
@@ -1083,7 +1216,7 @@ class GrapQuantUpgrade(GraphQuant):
     def quan_ops(self):
         layers = self.get_layers()
         for idx, layer in enumerate(layers):
-            try:
+            if 1:
                 # if hasattr(layer, 'quan_weight') or hasattr(layer, 'quan_feat'):
                 #     layer.quan_weight()
                 #     continue
@@ -1213,27 +1346,35 @@ class GrapQuantUpgrade(GraphQuant):
                             from scipy.spatial.distance import cosine
 
                             dist = cosine(simulation_data.reshape(-1), true_data.reshape(-1))
-
+                            # dist = np.abs(simulation_data.reshape(-1) - true_data.reshape(-1)).mean()
+                            
                             return np.float32(dist)
                         
                         si, sk, so = layer.get_in_scale()[0]['scale'], layer.get_w_scale()['scale'], layer.get_scale()[0]['scale']
                         so = layer.get_quantize()['feat']['sc0'].get_scale()[0]
                         out_shift, out_scale = get_scale_shift(si * sk / so) # type: ignore
-                        gap = sk * 0.5 / (2 * out_scale * 1000)
                         data = copy.deepcopy(weight)
                         qdata = get_quan_data(data, scale=sk, zero_point=layer.get_w_scale()['zero_point'])
                         qdata = get_dequan_data(qdata, scale=sk, zero_point=layer.get_w_scale()['zero_point'])
-                        error = Cosine_distance(qdata, data)                    
+                        min_error = Cosine_distance(qdata, data)                          
+
+                        sk_list = np.array([np.abs(weight).max(), np.abs(weight).mean()])
+                        sk_max = sk_list.max() #(2.0 ** (out_shift)) * out_scale * so / si
+                        sk_min = sk_list.min() #(2.0 ** (out_shift - 2)) * out_scale * so / si
+                        
+                        gap = (sk_max - sk_min) / 1000
+                        # for shift in range(out_shift+2, out_shift-2, -1):
                         for i in range(1000):
-                            scale_ = sk * 0.5 / (2 * out_scale) + gap * i
+                            # sk = (2.0 ** shift) * out_scale * so / si
+                            sk_ = sk_max - (i + 1) * gap
                             data = copy.deepcopy(weight)
-                            qdata = get_quan_data(data, scale=scale_, zero_point=layer.get_w_scale()['zero_point'])
-                            qdata = get_dequan_data(qdata, scale=scale_, zero_point=layer.get_w_scale()['zero_point'])
-                            error_ = Cosine_distance(qdata, data)
-                            # out_shift_, out_scale_ = get_scale_shift(si * scale_ / so) # type: ignore
-                            if error_ <= 6 * error:
-                                sk = scale_
-                                break
+                            qdata = get_quan_data(data, scale=sk_, zero_point=layer.get_w_scale()['zero_point'])
+                            qdata = get_dequan_data(qdata, scale=sk_, zero_point=layer.get_w_scale()['zero_point'])
+                            error = Cosine_distance(qdata, data)   
+                            if error < min_error:
+                                min_error = error
+                                sk = sk_
+                        
                     elif self.__reload_sk_params:
                         layer_name = layer.get_layer_name()
                         si = layer.get_in_scale()[0]['scale']
@@ -1241,6 +1382,14 @@ class GrapQuantUpgrade(GraphQuant):
                         # prelayer_out_names = prelayer.get_onnx_output_name()
                         # in_name = layer.get_onnx_input_name()[0]
                         # si = prelayer.get_scale()[prelayer_out_names.index(in_name)]                        
+                        # print(layer_name, self.sk_params.keys())
+                        
+                        # input_weights = np.abs(weight)
+                        # calib_hist, calib_bin_edges = np.histogram(input_weights, bins=2048, range=(0, input_weights.max()))
+                        # calib_amax = _compute_amax_percentile(calib_hist, calib_bin_edges, percentile=99.999)
+                        # # calib_amax = _compute_amax_mse(calib_hist, calib_bin_edges)
+                        # sk = calib_amax.numpy() / max_value   
+                                             
                         sk = self.sk_params[layer_name] / max_value
                         sk_origin = layer.get_w_scale()['scale']
                         diff_sk = sk_origin - sk
@@ -1248,8 +1397,8 @@ class GrapQuantUpgrade(GraphQuant):
                         print(layer_name, ", sk: ", sk_origin * max_value, self.sk_params[layer_name], max_value)
                     else:
                         print("please set search_smaller_sk or reload_sk_params to true!!!")
-                        os._exit(-1)
-                            
+                        # os._exit(-1)
+                        
                     layer.set_w_scale(dict(scale=sk, zero_point=layer.get_w_scale()['zero_point']))
                     qbias = bias / (si * sk)
                     qbias = np.round(qbias)
@@ -1269,10 +1418,10 @@ class GrapQuantUpgrade(GraphQuant):
                 layer.setting_ops(settings)
                 # save ops settings
                 layer.set_ops_setting(settings)
-            except:
-                error_info = "layer of {} quantize alignment wrong!".format(layer.get_layer_name())
-                print(error_info)
-                os._exit(-1)
+            # except:
+            #     error_info = "layer of {} quantize alignment wrong!".format(layer.get_layer_name())
+            #     print(error_info)
+            #     os._exit(-1)
 
     # update float/int scale when feat and weight update
     # update quan setting using layer idx as the key

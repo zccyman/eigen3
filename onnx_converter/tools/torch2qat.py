@@ -7,13 +7,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 try:
-    from utils import Registry, RoundFunction, ClampFunction
-    from tools.cvt2torch import *
-    from simulator import error_factory    
+    from utils import Registry, RoundFunction, ClampFunction, FunLSQ
 except Exception:
-    from onnx_converter.utils import Registry, RoundFunction, ClampFunction
-    from onnx_converter.tools.cvt2torch import *
-    from onnx_converter.simulator import error_factory
+    from onnx_converter.utils import Registry, RoundFunction, ClampFunction, FunLSQ
+
+from tools.cvt2torch import *
+from simulator import error_factory
 
 TORCH2QAT: Registry = Registry("torch2qat", scope="")
 
@@ -36,31 +35,36 @@ import torch
 #         return grad_output, None
     
     
-def clamp(data, num_bits=8):
-    min_val = -2 ** (num_bits - 1)
-    max_val = 2 ** (num_bits - 1) - 1
-    data = ClampFunction.apply(
-        data,
-        torch.Tensor([min_val]).to(data.device),
-        torch.Tensor([max_val]).to(data.device),
-    )
-    return data
+# def clamp(data, num_bits=8):
+#     min_val = -2 ** (num_bits - 1)
+#     max_val = 2 ** (num_bits - 1) - 1
+#     data = ClampFunction.apply(
+#         data,
+#         torch.Tensor([min_val]).to(data.device),
+#         torch.Tensor([max_val]).to(data.device),
+#     )
+#     return data
 
 
-def quant(data, scale, zp=0, num_bits=8):
-    data = RoundFunction.apply(data / scale.to(data.device))
-    data = clamp(data, num_bits=num_bits)
-    return data
+# def quant(data, scale, zp=0, num_bits=8):
+#     data = RoundFunction.apply(data / scale.to(data.device))
+#     data = clamp(data, num_bits=num_bits)
+#     return data
 
 
-def dequant(data, scale, zp=0):
-    data = data * scale.to(data.device)
-    return data
+# def dequant(data, scale, zp=0):
+#     data = data * scale.to(data.device)
+#     return data
 
 
 def fake_quant(data, scale, num_bits=8):
-    data = quant(data, scale, num_bits=num_bits)
-    data = dequant(data, scale)
+    # data = quant(data, scale, num_bits=num_bits)
+    # data = dequant(data, scale)
+    QN = -2 ** (num_bits - 1)
+    QP = 2 ** (num_bits - 1) - 1   
+    g = 1.0 / data.numel() # 1 / np.sqrt(data.numel() * QP)
+    data = FunLSQ.apply(data, scale, g, QN, QP)
+    
     return data
 
 
@@ -90,13 +94,13 @@ class EMA(TORCH_BASE):
         dmax = torch.ones(1, dtype=torch.float32) * kwargs.get("dmax")
         dmin = dmin.to(self.device)
         dmax = dmax.to(self.device)
-        self.dmin = nn.Parameter(dmin, requires_grad=True)
-        self.dmax = nn.Parameter(dmax, requires_grad=True)
+        self.dmin = nn.Parameter(dmin, requires_grad=False)
+        self.dmax = nn.Parameter(dmax, requires_grad=False)
         self.reset_ema_param_sucess = True
         # self.lstm = nn.LSTM(input_size=256, hidden_size=256, num_layers=1, batch_first=True)
            
-        # self.scale = 1.0
-        self.ema_decay = 0.999
+        ema_decay = torch.ones(1, dtype=torch.float32) * 0.99 #kwargs.get("ema_decay", 0.99)
+        self.ema_decay = nn.Parameter(ema_decay, requires_grad=False)
         self.lock = threading.Lock()
         
     def get_ema_params(self):
@@ -118,19 +122,20 @@ class EMA(TORCH_BASE):
         return dmin, dmax
 
     def update(self, dmin, dmax):
-        for min_val, max_val in zip(dmin, dmax):
-            if self.dmin.data is None:
-                self.dmin.data = min_val.to(self.device)
-            else:
-                self.dmin.data = self.ema_decay * self.dmin.data.to(self.device) + (
-                    1 - self.ema_decay) * min_val.to(self.device)
+        self.ema_decay.data = self.ema_decay.data.to(self.device)
 
-            if self.dmax.data is None:
+        for i, (min_val, max_val) in enumerate(zip(dmin, dmax)):
+            if self.dmin.data is None or self.dmax.data is None:
+                self.dmin.data = min_val.to(self.device)
                 self.dmax.data = max_val.to(self.device)
             else:
-                self.dmax.data = self.ema_decay * self.dmax.data.to(self.device) + (
-                    1 - self.ema_decay) * max_val.to(self.device)
-
+                self.dmin.data = self.ema_decay.data * self.dmin.data + (
+                    1 - self.ema_decay.data
+                ) * min_val.to(self.device)
+                self.dmax.data = self.ema_decay.data * self.dmax.data + (
+                    1 - self.ema_decay.data
+                ) * max_val.to(self.device)   
+                     
     def get_scale(self, num_bits=8):
         max_val = 2 ** (num_bits - 1) - 1
         dmin = torch.abs(self.dmin)
@@ -143,6 +148,12 @@ class EMA(TORCH_BASE):
         try:
             dmin, dmax = self.get_maxminvalue(data)
             self.update(dmin, dmax)
+            # min_val, max_val = torch.min(data), torch.max(data)
+            # min_val, max_val = torch.median(dmin), torch.median(dmax)
+            # self.dmin.data = self.ema_decay.data.to(self.device) * self.dmin.data.to(self.device) + (
+            #         1 - self.ema_decay.data.to(self.device)) * min_val.to(self.device)
+            # self.dmax.data = self.ema_decay.data.to(self.device) * self.dmax.data.to(self.device) + (
+            #         1 - self.ema_decay.data.to(self.device)) * max_val.to(self.device)
             scale = self.get_scale()
         finally:
             self.lock.release()
@@ -165,6 +176,13 @@ class QAT_BASE(object):
     #     self.u_params = len(self.ema_so) * [u_param]
     #     self.init_pact_param_sucess = False
         
+        self.is_trainning = True
+        self.smooth_mode = False
+        
+        
+    def set_train_mode(self, is_trainning):
+        self.is_trainning = is_trainning if self.process_scale != 'smooth' else False
+                
     # def pact(self, in_data):
     #     if not self.init_pact_param_sucess:
     #         for idx, data in enumerate(in_data):
@@ -250,20 +268,27 @@ class QAT_BASE(object):
                     weight_data.max(),
                 ), iter)
 
-    def quant(self, in_data):
-        for idx, data in enumerate(in_data):
-            data = data.to(self.device)
-            scale = self.ema_si[idx].get_scale().to(self.device)
-            in_data[idx] = fake_quant(data, scale)
+    # def quant(self, in_data, num_bits=8):
+    #     # QN = -2 ** (num_bits - 1)
+    #     # QP = 2 ** (num_bits - 1) - 1         
+    #     for idx, data in enumerate(in_data):
+    #         data = data.to(self.device)
+    #         scale = self.ema_si[idx].get_scale().to(self.device)
+    #         in_data[idx] = fake_quant(data, scale, num_bits=num_bits)
             
-        return in_data
+    #     return in_data
 
-    def dequant(self, in_data):
+    def quant(self, in_data):
+        return in_data
+    
+    def dequant(self, in_data, num_bits=8):
+        # QN = -2 ** (num_bits - 1)
+        # QP = 2 ** (num_bits - 1) - 1           
         for idx, data in enumerate(in_data):
             data = data.to(self.device)
-            if self.is_tranning: self.ema_so[idx](data) ### update scale
+            if self.is_trainning and not self.smooth_mode: self.ema_so[idx](data) ### update scale
             scale = self.ema_so[idx].get_scale().to(self.device)
-            in_data[idx] = fake_quant(data, scale)
+            in_data[idx] = fake_quant(data, scale, num_bits=num_bits)
         
         # num_bits = 8
         # for idx, data in enumerate(in_data):
@@ -311,7 +336,9 @@ class QAT_CONV2D(QAT_BASE, TORCH_CONV2D):
         super(QAT_CONV2D, self).__init__(**kwargs)
 
     def get_params(self):
-        return [self.weight, self.bias]
+        weight = self.weight
+        bias = self.bias     
+        return [weight, bias]
 
     def set_sk_params(self, sk_dmax):
         self.sk_dmax.data = sk_dmax
@@ -333,10 +360,10 @@ class QAT_CONV2D(QAT_BASE, TORCH_CONV2D):
         self.bias.data = torch.from_numpy(bias)
     
     def get_weights(self):
-        # weight = self.weight
-        # bias = self.bias 
-        weight = self.weight_add_offset(self.weight)
-        bias = self.bias_add_offset(self.bias)
+        weight = self.weight
+        bias = self.bias 
+        # weight = self.weight_add_offset(self.weight)
+        # bias = self.bias_add_offset(self.bias)
         # weight = self.apply_fake_quant(self.weight, is_training=False)
         # bias = self.bias_add_offset(weight, self.bias)
         if weight.device.type == "cuda":
@@ -345,22 +372,22 @@ class QAT_CONV2D(QAT_BASE, TORCH_CONV2D):
             bias = bias.to(device='cpu')
         return weight.detach().numpy(), bias.detach().numpy()
 
-    def quant(self, in_data):
-        # for idx, data in enumerate(in_data):
-        #     data = data.to(self.device)
-        #     scale = self.ema_si[idx].get_scale().to(self.device)
-        #     in_data[idx] = quant(data, scale)
+    # def quant(self, in_data):
+    #     # for idx, data in enumerate(in_data):
+    #     #     data = data.to(self.device)
+    #     #     scale = self.ema_si[idx].get_scale().to(self.device)
+    #     #     in_data[idx] = quant(data, scale)
             
-        return in_data
+    #     return in_data
 
-    def dequant(self, in_data):
-        for idx, data in enumerate(in_data):
-            data = data.to(self.device)
-            if self.is_tranning: self.ema_so[idx](data) ### update scale
-        #     scale = self.ema_so[idx].get_scale().to(self.device)
-        #     in_data[idx] = dequant(data, scale)
+    # def dequant(self, in_data):
+    #     for idx, data in enumerate(in_data):
+    #         data = data.to(self.device)
+    #         if self.is_tranning: self.ema_so[idx](data) ### update scale
+    #     #     scale = self.ema_so[idx].get_scale().to(self.device)
+    #     #     in_data[idx] = dequant(data, scale)
         
-        return in_data
+    #     return in_data
         
     # def quant(self, in_data):
     #     for idx, data in enumerate(in_data):
@@ -394,7 +421,7 @@ class QAT_CONV2D(QAT_BASE, TORCH_CONV2D):
         with torch.no_grad():
             sk = calc_scale(self.weight).to(self.device)
         # return TORCH_CONV2D.forward(self, in_data, sk=sk, si=si, so=so)
-        return TORCH_CONV2D.forward(self, in_data, sk=sk, si=si, so=so, fake_quant=fake_quant, quant=quant, dequant=dequant)
+        return TORCH_CONV2D.forward(self, in_data, sk=sk, si=si, so=so, fake_quant=fake_quant, is_trainning=self.is_trainning)
 
 
 @TORCH2QAT.register_module(name="add")
@@ -412,40 +439,40 @@ class QAT_ADD(QAT_BASE, TORCH_ADD):
                 break
         return scale, -int_scale
        
-    def get_scale_shift(self):
-        return dict(scale=self.scale, shift=self.shift) 
+    # def get_scale_shift(self):
+    #     return dict(scale=self.scale, shift=self.shift) 
     
-    def quant(self, in_data):
-        self.scale, self.shift = [], []
-        so = self.ema_so[0].get_scale().to(self.device)
-        for idx, data in enumerate(in_data):
-            data = data.to(self.device)
-            si = self.ema_si[idx].get_scale().to(self.device)
-            data = quant(data, si)
+    # def quant(self, in_data):
+    #     self.scale, self.shift = [], []
+    #     so = self.ema_so[0].get_scale().to(self.device)
+    #     for idx, data in enumerate(in_data):
+    #         data = data.to(self.device)
+    #         si = self.ema_si[idx].get_scale().to(self.device)
+    #         data = quant(data, si)
 
-            scale, shift = self.update_scale(si / so)
-            self.scale.append(scale)
-            self.shift.append(shift)
+    #         scale, shift = self.update_scale(si / so)
+    #         self.scale.append(scale)
+    #         self.shift.append(shift)
             
-            data = clamp(data * scale, num_bits=16) ### int8 * int8, int16
-            data = clamp(
-                RoundFunction.apply(data * (2 ** shift)), 
-                num_bits=16,
-            ) ### int16
+    #         data = clamp(data * scale, num_bits=16) ### int8 * int8, int16
+    #         data = clamp(
+    #             RoundFunction.apply(data * (2 ** shift)), 
+    #             num_bits=16,
+    #         ) ### int16
 
-            in_data[idx] = data
+    #         in_data[idx] = data
             
-        return in_data
+    #     return in_data
 
-    def dequant(self, in_data):
-        for idx, data in enumerate(in_data):
-            data = data.to(self.device)
-            if self.is_tranning: self.ema_so[idx](data) ### update scale
-            scale = self.ema_so[idx].get_scale().to(self.device)
-            data = clamp(data, num_bits=8) ### int8
-            in_data[idx] = dequant(data, scale)
+    # def dequant(self, in_data):
+    #     for idx, data in enumerate(in_data):
+    #         data = data.to(self.device)
+    #         if self.is_tranning: self.ema_so[idx](data) ### update scale
+    #         scale = self.ema_so[idx].get_scale().to(self.device)
+    #         data = clamp(data, num_bits=8) ### int8
+    #         in_data[idx] = dequant(data, scale)
                   
-        return in_data
+    #     return in_data
     
     def forward(self, in_data):
         return TORCH_ADD.forward(self, in_data)
@@ -467,36 +494,36 @@ class QAT_SPLIT(QAT_ADD, TORCH_SPLIT):
     def __init__(self, **kwargs):
         super(QAT_SPLIT, self).__init__(**kwargs)
         
-    def quant(self, in_data):
-        for idx, data in enumerate(in_data):
-            data = data.to(self.device)
-            scale = self.ema_si[idx].get_scale().to(self.device)
-            in_data[idx] = quant(data, scale)
+    # def quant(self, in_data):
+    #     for idx, data in enumerate(in_data):
+    #         data = data.to(self.device)
+    #         scale = self.ema_si[idx].get_scale().to(self.device)
+    #         in_data[idx] = quant(data, scale)
                   
-        return in_data
+    #     return in_data
             
-    def dequant(self, in_data):
-        self.scale, self.shift = [], []
-        si = self.ema_si[0].get_scale().to(self.device)
-        for idx, data in enumerate(in_data):
-            data = data.to(self.device)
-            if self.is_tranning: self.ema_so[idx](data) ### update scale
-            so = self.ema_so[idx].get_scale().to(self.device)
+    # def dequant(self, in_data):
+    #     self.scale, self.shift = [], []
+    #     si = self.ema_si[0].get_scale().to(self.device)
+    #     for idx, data in enumerate(in_data):
+    #         data = data.to(self.device)
+    #         if self.is_tranning: self.ema_so[idx](data) ### update scale
+    #         so = self.ema_so[idx].get_scale().to(self.device)
             
-            scale, shift = self.update_scale(si / so)
-            self.scale.append(scale)
-            self.shift.append(shift)
+    #         scale, shift = self.update_scale(si / so)
+    #         self.scale.append(scale)
+    #         self.shift.append(shift)
                         
-            data = clamp(data * scale, num_bits=16) ### int8 * int8, int16
-            data = clamp(
-                RoundFunction.apply(data * (2 ** shift)), 
-                num_bits=8,
-            ) ### int8
-            data = dequant(data, so)
+    #         data = clamp(data * scale, num_bits=16) ### int8 * int8, int16
+    #         data = clamp(
+    #             RoundFunction.apply(data * (2 ** shift)), 
+    #             num_bits=8,
+    #         ) ### int8
+    #         data = dequant(data, so)
             
-            in_data[idx] = data
+    #         in_data[idx] = data
             
-        return in_data
+    #     return in_data
 
     def forward(self, in_data):
         return TORCH_SPLIT.forward(self, in_data)
@@ -517,7 +544,8 @@ class QAT_MAXPOOL(QAT_BASE, TORCH_MAXPOOL):
 
     def __init__(self, **kwargs):
         super(QAT_MAXPOOL, self).__init__(**kwargs)
-
+        self.smooth_mode = True
+        
     def forward(self, in_data):
         return TORCH_MAXPOOL.forward(self, in_data)
 
@@ -538,7 +566,8 @@ class QAT_RESHAPE(QAT_BASE, TORCH_RESHAPE):
 
     def __init__(self, **kwargs):
         super(QAT_RESHAPE, self).__init__(**kwargs)
-
+        self.smooth_mode = True
+        
     def forward(self, in_data):
         return TORCH_RESHAPE.forward(self, in_data)
     
@@ -547,7 +576,8 @@ class QAT_SHUFFLE_ONLY(QAT_BASE, TORCH_SHUFFLE_ONLY):
 
     def __init__(self, **kwargs):
         super(QAT_SHUFFLE_ONLY, self).__init__(**kwargs)
-
+        self.smooth_mode = True
+        
     def forward(self, in_data):
         return TORCH_SHUFFLE_ONLY.forward(self, in_data)    
     
@@ -557,7 +587,8 @@ class QAT_AVERAGEPOOL(QAT_BASE, TORCH_AVERAGEPOOL):
 
     def __init__(self, **kwargs):
         super(QAT_AVERAGEPOOL, self).__init__(**kwargs)
-
+        self.smooth_mode = False
+        
     def forward(self, in_data):
         return TORCH_AVERAGEPOOL.forward(self, in_data)    
     
@@ -576,49 +607,50 @@ class QAT_MUL(QAT_BASE, TORCH_MUL):
                 return np.int32(shift), out_scale
         return np.int32(0), scale
     
-    def quant(self, in_data):
-        for idx, data in enumerate(in_data):
-            data = data.to(self.device)
-            scale = self.ema_si[idx].get_scale().to(self.device)
-            in_data[idx] = quant(data, scale)
+    # def quant(self, in_data):
+    #     for idx, data in enumerate(in_data):
+    #         data = data.to(self.device)
+    #         scale = self.ema_si[idx].get_scale().to(self.device)
+    #         in_data[idx] = quant(data, scale)
                   
-        return in_data
+    #     return in_data
             
-    def dequant(self, in_data):
-        self.scale, self.shift = [], []
-        si = self.ema_si[0].get_scale().to(self.device)
-        sk = self.ema_si[1].get_scale().to(self.device)
-        for idx, data in enumerate(in_data):
-            data = data.to(self.device)
-            if self.is_tranning: self.ema_so[idx](data) ### update scale
-            so = self.ema_so[idx].get_scale().to(self.device)
-            scale = si * sk / so
+    # def dequant(self, in_data):
+    #     self.scale, self.shift = [], []
+    #     si = self.ema_si[0].get_scale().to(self.device)
+    #     sk = self.ema_si[1].get_scale().to(self.device)
+    #     for idx, data in enumerate(in_data):
+    #         data = data.to(self.device)
+    #         if self.is_tranning: self.ema_so[idx](data) ### update scale
+    #         so = self.ema_so[idx].get_scale().to(self.device)
+    #         scale = si * sk / so
             
-            out_scale, out_shift = self.update_scale(scale)
-            out_scale = RoundFunction.apply(out_scale * (2 ** self.int_scale))
-            out_scale = ClampFunction.apply(
-                out_scale, 
-                torch.Tensor([0.0]).to(self.device),
-                torch.Tensor([(2 ** self.int_scale) - 1]).to(self.device), ### uint8
-            )
-            self.scale.append(out_scale)
-            self.shift.append(out_shift)
+    #         out_scale, out_shift = self.update_scale(scale)
+    #         out_scale = torch.tensor(out_scale * (2 ** self.int_scale), dtype=torch.float32).to(self.device)
+    #         out_scale = RoundFunction.apply(out_scale)
+    #         out_scale = ClampFunction.apply(
+    #             out_scale, 
+    #             torch.Tensor([0.0]).to(self.device),
+    #             torch.Tensor([(2 ** self.int_scale) - 1]).to(self.device), ### uint8
+    #         )
+    #         self.scale.append(out_scale)
+    #         self.shift.append(out_shift)
                         
-            data = RoundFunction.apply(data * (2 ** out_shift)), 
-            data = clamp(data, num_bits=8)
+    #         data = RoundFunction.apply(data * (2 ** out_shift))
+    #         data = clamp(data, num_bits=8)
             
-            data = RoundFunction.apply(data * out_scale)
-            data = clamp(data, num_bits=16)
+    #         data = RoundFunction.apply(data * out_scale)
+    #         data = clamp(data, num_bits=16)
             
-            data = clamp(
-                RoundFunction.apply(data * (2 ** (-self.int_scale))), 
-                num_bits=8,
-            ) ### int8
-            data = dequant(data, so)
+    #         data = clamp(
+    #             RoundFunction.apply(data * (2 ** (-self.int_scale))), 
+    #             num_bits=8,
+    #         ) ### int8
+    #         data = dequant(data, so)
             
-            in_data[idx] = data
+    #         in_data[idx] = data
             
-        return in_data
+    #     return in_data
         
     def forward(self, in_data):
         return TORCH_MUL.forward(self, in_data)    

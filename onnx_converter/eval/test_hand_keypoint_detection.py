@@ -143,13 +143,11 @@ class HandKeyPointPreProcess(object):
         return self.trans
 
     def __call__(self, img):
-        img_input = img.astype(np.float32) / 255.0
+        img_input = img.astype(np.float32) / 255
         img_mean = np.array(self.img_mean, dtype=np.float32)
         img_std = np.array(self.img_std, dtype=np.float32)
         img_input = (img_input - img_mean) / img_std
-        # np.save("prepost_cpp/hand_keypoint_detection/data/img_input_normalize.npy", img_input.reshape(-1).astype(np.float32))
         img_input = np.transpose(img_input, [2, 0, 1])
-        # np.save("prepost_cpp/hand_keypoint_detection/data/img_input_tranpose.npy", img_input.reshape(-1).astype(np.float32))
         img_input = np.expand_dims(img_input, axis=0)
 
         self.set_trans(dict(input_size=self.input_size))
@@ -188,7 +186,6 @@ class HandKeyPointPostProcess(object):
         predicts = outputs["output"]
         down_scale = input_size[0] // predicts.shape[2]
         
-        # np.save("prepost_cpp/hand_keypoint_detection/data/predicts.npy", predicts.transpose(0, 2, 3, 1).reshape(-1).astype(np.float32))
         kp_point, kp_score = get_final_predicts(batch_heatmaps=predicts, down_scale=down_scale)
         kp_point, kp_score = kp_point[0, :], kp_score[0, :]
 
@@ -198,8 +195,7 @@ class HandKeyPointPostProcess(object):
         kp_point = np.abs(kp_point)
 
         results = np.concatenate([kp_point, kp_score], axis=-1)
-        # np.save("prepost_cpp/hand_keypoint_detection/data/results.npy", results.reshape(-1).astype(np.float32))
-        
+
         return dict(heatmap=predicts, results=results, down_scale=down_scale)
 
 
@@ -219,7 +215,8 @@ def parse_args():
         type=str,
         # default="Keypoint-MobileNetV2/onnx_weights/mobilenetv2_192_192_simplify.onnx",
         # default="Keypoint-MobileNetV2/onnx_weights/mobilenetv2_upsample_192_192_simplify.onnx",
-        default="work_dir/hand_keypoint_weight/mobilenetv2_upsample_no_bn_192_192_simplify.onnx",
+        # default="Keypoint-MobileNetV2/onnx_weights/mobilenetv2_upsample_no_bn_192_192_simplify.onnx",
+        default="Keypoint-LiteHRNet18/onnx_weights/litehrnet18_192_192_simplify.onnx",
         # default="work_dir/mobilenetv2_upsample_no_bn_192_192_simplify_cross_layer_equalization.onnx",
         # default="work_dir/mobilenetv2_upsample_no_bn_192_192_simplify_bias_correction.onnx",
         # default="work_dir/qat/mobilenetv2_upsample_no_bn_192_192_simplify_qat_60.onnx",
@@ -261,7 +258,7 @@ def parse_args():
     )
     parser.add_argument("--fp_result", type=bool, default=True)
     parser.add_argument("--export_version", type=int, default=3)
-    parser.add_argument("--export", type=bool, default=True)
+    parser.add_argument("--export", type=bool, default=False)
     parser.add_argument("--debug", type=bool, default=False)
     parser.add_argument("--is_stdout", type=bool, default=True)
     parser.add_argument("--log_level", type=int, default=30)

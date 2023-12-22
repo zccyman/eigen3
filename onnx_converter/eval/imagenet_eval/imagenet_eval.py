@@ -1149,7 +1149,7 @@ class ClsEval(Eval):
         top5_m.update(acc5.item(), 1)
         return top1_m, top5_m
                           
-    def __call__(self):
+    def __call__(self, calibration_params_json_path):
         top1_m_quant = AverageMeter()
         top5_m_quant = AverageMeter()
         if self.fp_result:
@@ -1158,7 +1158,10 @@ class ClsEval(Eval):
                     
         # self.eval_mode = "single"
         if self.eval_mode == 'dataset':
-            self.process.quantize(fd_path=self.quan_dataset_path, is_dataset=True, prefix=self.img_prefix)
+            self.process.quantize(
+                fd_path=self.quan_dataset_path, is_dataset=True, prefix=self.img_prefix, 
+                calibration_params_json_path=calibration_params_json_path,
+            )
                     
         images_and_targets, class_to_idx = find_images_and_targets(self.dataset_path, class_to_idx=None)
         image_files = tqdm(images_and_targets, postfix='image files') if self.is_stdout else images_and_targets
@@ -1194,9 +1197,9 @@ class ClsEval(Eval):
                     gt_cls, top1_m_float, top5_m_float,
                 )
                                                             
-            if 0 == image_id and self.eval_first_frame: break
-            # if 0 == image_id:
-            #     break
+            # if 0 == image_id and self.eval_first_frame: break
+            if 1000 == image_id:
+                break
             
         if not self.is_calc_error and self.process.onnx_graph:
             img = cv2.imread(image_files[0])

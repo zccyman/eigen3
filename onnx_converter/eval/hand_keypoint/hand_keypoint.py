@@ -239,10 +239,7 @@ class CocoEval(Eval):  # type: ignore
 
         # self.eval_mode = "single"
         if self.eval_mode == "dataset":
-            self.process.quantize(
-                fd_path=quan_dataset_path, is_dataset=is_dataset, 
-                calibration_params_json_path=calibration_params_json_path,
-            )
+            self.process.quantize(fd_path=quan_dataset_path, is_dataset=is_dataset, calibration_params_json_path=calibration_params_json_path)
 
         json_fr = open(ann_path, "r")
         content = json_fr.read()
@@ -251,17 +248,14 @@ class CocoEval(Eval):  # type: ignore
         acc_quant = AverageMeter()
         acc_float = AverageMeter()
 
-        image_names = list(json_data.keys())
-        for image_id, image_name in enumerate(
-            tqdm.tqdm(image_names, postfix="image files")
+        for i, image_name in enumerate(
+            tqdm.tqdm(json_data.keys(), postfix="image files")
         ):
-            # if image_id < 2000:
+            # if i < 2500:
             #     continue
-                        
             img = cv2.imread(os.path.join(dataset_path, image_name))
             img_clone = copy.deepcopy(img)
-            # os.system("cp {}/{} prepost_cpp/hand_keypoint_detection/data/".format(dataset_path, image_name))
-            
+
             if self.eval_mode == "single":
                 self.process.quantize(fd_path=img, is_dataset=False)
 
@@ -346,7 +340,7 @@ class CocoEval(Eval):  # type: ignore
                     os.path.join(save_imgs, os.path.basename(image_name)), qres
                 )  ### results for draw bbox
 
-            # if 100 == image_id:
+            # if 0 == i:
             #     break
 
         accuracy = dict(
@@ -354,12 +348,5 @@ class CocoEval(Eval):  # type: ignore
             qaccuracy={"acc.avg": acc_quant.avg},
         )
         tb = self.get_results(accuracy)
-        if not self.is_calc_error and self.process.onnx_graph:
-            img = cv2.imread(os.path.join(dataset_path, image_names[image_id]))
-            os.system("cp {}/{} work_dir/".format(dataset_path, image_names[image_id]))
-            true_outputs = self.process.post_quan.onnx_infer(img)
-            self.process.numpygraph(img, acc_error=True, onnx_outputs=true_outputs)
-        else:
-            os.system("cp {}/{} work_dir/".format(dataset_path, image_names[image_id]))
-            
+
         return accuracy, tb

@@ -1,0 +1,22 @@
+{
+    "epochs": 1000, 
+    "batch_size": 16, 
+    "max_learning_rate": 1.0e-4, 
+    "min_learning_rate": 1.0e-5,
+    "weight_decay": 0.0,
+    "world_size": 1, 
+    "rank": 1,
+    "print_log_per_epoch": 1,
+    "save_onnx_interval": 100,
+    "update_so_by_ema": false,
+    "__keyword_params": ["sk", "hv", "beta"],
+    "keyword_params": ["sk", "si", "sc", "so", "weight", "bias"],
+    "calibration_dataset_path": "/buffer/calibrate_dataset/ImageNet_calibrate",
+    "train_dataset_path": "/buffer/calibrate_dataset/ImageNet_calibrate",
+    "image_prefix": "JPEG",
+    "__train_dataset_path": "/data/vision/buffer/ImageNet/val",
+    "__sk_params_file": "sk_params_99.json",
+    "__calibration_params_file": "work_dir/qat/calibration_99.json",
+    "work_dir": "work_dir/qat/test_imagenet",
+    "log_name": "test_imagenet_qat.log"
+}

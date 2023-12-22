@@ -5,6 +5,7 @@
 # @Company  : SHIQING TECH
 # @Time     : 2022/2/15 9:58
 # @File     : test_imagenet.py
+import copy
 import sys  # NOQA: E402
 
 sys.path.append('./')  # NOQA: E402
@@ -20,6 +21,24 @@ from typing import Tuple
 
 from eval.imagenet_eval import ClsEval
 
+try:
+    from tools import WeightOptimization
+except:
+    from onnx_converter.tools import WeightOptimization
+    
+    
+class ClsEvalWeightOpt(ClsEval):
+    def __init__(self, **kwargs):
+        super(ClsEvalWeightOpt, self).__init__(**kwargs)
+        self.weight_optimization = kwargs["weight_optimization"]
+        self.process_args_wo = copy.deepcopy(kwargs['process_args'])
+        self.process_wo = WeightOptimization(**self.process_args_wo)
+    
+    def __call__(self, config_file=None):
+        if self.weight_optimization in ["cross_layer_equalization"]:
+            eval("self.process_wo." + self.weight_optimization)()
+        else:
+            eval("self.process_wo." + self.weight_optimization)(config_file=config_file)
 
 class PreProcess(object):
 
@@ -115,8 +134,7 @@ def parse_args():
                         default='/buffer/calibrate_dataset/ImageNet_calibrate',
                         )
     parser.add_argument('--model_path', type=str,
-                        # default='RTM_CSPNeXt_tiny_onnx/rtmdet_tiny_cls_224x224_sim.onnx',
-                        default='work_dir/qat/test_imagenet/rtmdet_tiny_cls_224x224_sim_qat_56.onnx',
+                        default='RTM_CSPNeXt_tiny_onnx/rtmdet_tiny_cls_224x224_sim.onnx',
                         )
     # torchvision_MobileNetV3_small_ImageNet_classification_simplify.onnx
     # MobileNetv3_classification-sim-remove-expandOp_replace-reduce.onnx
@@ -126,19 +144,14 @@ def parse_args():
     parser.add_argument('--export_version', type=int, default=3)
     parser.add_argument('--device', type=str, default="cpu", help='There can be two options: cpu or cuda:3')
     parser.add_argument('--fp_result', type=bool, default=True)
-    parser.add_argument('--export', type=bool, default=False)
+    parser.add_argument('--export', type=bool, default=True)
     parser.add_argument('--debug', type=bool, default=False)
     parser.add_argument('--is_stdout', type=bool, default=True)
-    parser.add_argument('--log_level', type=int, default=30)    
+    parser.add_argument('--log_level', type=int, default=10)    
     parser.add_argument('--error_analyzer', type=bool, default=False) 
     parser.add_argument('--is_calc_error', type=bool, default=False)  # whether to calculate each layer error
-    parser.add_argument(
-        "--calibration_params_json_path", 
-        type=str, 
-        default="work_dir/qat/test_imagenet/calibration_56.json",
-        # default=None,
-    )    
-    
+    # bias_correction cross_layer_equalization
+    parser.add_argument('--weight_optimization', type=str, default="qat")   
     args = parser.parse_args()
     return args
 
@@ -201,17 +214,11 @@ if __name__ == '__main__':
         'process_args': process_args,
         'is_calc_error': args.is_calc_error,
         'acc_error': acc_error,
+        "weight_optimization": args.weight_optimization,
         'fp_result': args.fp_result,
         'eval_mode': eval_mode,  # single | dataset
         'model_path': args.model_path,
     }
 
-    cls_eval = ClsEval(**kwargs_clseval)
-    accuracy, tb = cls_eval(calibration_params_json_path=args.calibration_params_json_path)
-    if args.is_calc_error:
-        cls_eval.collect_error_info()     
-    if args.error_analyzer:
-        cls_eval.error_analysis()     
-    if args.export:
-        cls_eval.export()
-    print(tb)
+    cls_eval = ClsEvalWeightOpt(**kwargs_clseval)
+    cls_eval(config_file="tests/qat/test_imagenet.json") 

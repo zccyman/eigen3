@@ -1,0 +1,18 @@
+{
+    "epochs": 10, 
+    "batch_size": 4, 
+    "max_learning_rate": 1.0e-4, 
+    "min_learning_rate": 1.0e-5,
+    "weight_decay": 0.0,
+    "world_size": 1, 
+    "rank": 0,
+    "print_log_per_epoch": 10,
+    "save_onnx_interval": 1,
+    "calibration_dataset_path": "/buffer/calibrate_dataset/gesture_recognition",
+    "train_dataset_path": "/buffer/calibrate_dataset/gesture_recognition",
+    "image_prefix": "jpg",
+    "__sk_params_file": "sk_params_99.json",
+    "__calibration_params_file": "work_dir/qat/calibration_99.json",
+    "work_dir": "work_dir/qat/test_gesture_recognition",
+    "log_name": "test_gesture_recognition_qat.log"
+}

@@ -61,8 +61,6 @@ class OnnxConverter(Object): # type: ignore
         # create session with all ftms as outputs
         #self.create_session(self.model_path)
         #self.ftm_names = self.get_output_name(self.sess)
-        self.reload_sk_params = self.kwargs.get('reload_sk_params', False)
-        self.sk_params_json_path = self.kwargs.get('sk_params_json_path', None)
         self.chip_model = self.kwargs.get('chip_model', None)
         self.bgr_format = self.kwargs.get('bgr_format', True)
         self.user_model = self.kwargs.get('user_model', False)
@@ -133,9 +131,6 @@ class OnnxConverter(Object): # type: ignore
         self.__parse_dict['is_simplify'] = self.is_simplify # type: ignore
         if self.kwargs['quantization_args']:
             self.__update_cfg(self.kwargs['quantization_args'])
-        
-        self.__quan_dict["reload_sk_params"] = self.reload_sk_params
-        self.__quan_dict["sk_params_json_path"] = self.sk_params_json_path
         
         # 0--no error, 1--layer error, 2--deep error analyzer
         self.do_check_error = self.kwargs['layer_error_args'].get("do_check_error", 0)# simulation with error print
@@ -358,9 +353,6 @@ class OnnxConverter(Object): # type: ignore
                       txme_saturation=txme_saturation, 
                       fuse_act=self.__quan_dict["fuse_act"], # type: ignore
                       is_last_layer_fuse_act=self.__quan_dict["is_last_layer_fuse_act"], # type: ignore
-                    #   search_smaller_sk=self.__quan_dict["search_smaller_sk"],
-                      reload_sk_params=self.__quan_dict["reload_sk_params"],
-                      sk_params_json_path=self.__quan_dict["sk_params_json_path"],                       
                       output = self.__quan_dict['output']) # type: ignore
         
         kwargs.update(dict(log_name=self.log_name, log_level=self.log_level))
@@ -521,19 +513,19 @@ class OnnxConverter(Object): # type: ignore
             self.__logger.error('create timeintelli simulation structure failed!')
             os._exit(-1)
 
-    def calibration(self, inputs, calibration_params_json_path=None):
+    def calibration(self, inputs):
         # calibration from datasets
         if isinstance(inputs, np.ndarray):
             if len(inputs.shape) == 3:
                 self.quan_graph = self.__post_quan.quan_file(inputs)
             elif len(inputs.shape) == 4:
-                self.quan_graph = self.__post_quan.quan_dataset(inputs, calibration_params_json_path=calibration_params_json_path)
+                self.quan_graph = self.__post_quan.quan_dataset(inputs)
             else:
                 self.__logger.error("Calibration not Support input datasets!")
                 os.exit(-1)
         else:
             if isinstance(inputs, list) or os.path.isdir(inputs):
-                self.quan_graph = self.__post_quan.quan_dataset(inputs, calibration_params_json_path=calibration_params_json_path)
+                self.quan_graph = self.__post_quan.quan_dataset(inputs)
             # calibration from single file
             elif isinstance(inputs, str):
                 self.quan_graph = self.__post_quan.quan_file(inputs)

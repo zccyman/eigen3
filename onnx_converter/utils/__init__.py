@@ -16,4 +16,4 @@ from .logger import Logging
 from .BaseObject import Object
 from .image import process_im
 from .similarity import Similarity
-from .utils import RoundFunction, FloorFunction, ClampFunction
+from .utils import RoundFunction, FloorFunction, ClampFunction, FunLSQ

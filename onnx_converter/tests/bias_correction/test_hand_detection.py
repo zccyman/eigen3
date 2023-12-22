@@ -24,6 +24,24 @@ from torch import nn
 from torchvision.ops import nms
 
 from eval.coco_eval import CocoEval, overlay_bbox_cv
+try:
+    from tools import WeightOptimization
+except:
+    from onnx_converter.tools import WeightOptimization
+    
+    
+class CocoEvalWeightOpt(CocoEval):
+    def __init__(self, **kwargs):
+        super(CocoEvalWeightOpt, self).__init__(**kwargs)
+        self.weight_optimization = kwargs["weight_optimization"]
+        self.process_args_wo = copy.deepcopy(kwargs['process_args'])
+        self.process_wo = WeightOptimization(**self.process_args_wo)
+    
+    def __call__(self, quan_dataset_path=None):
+        if self.weight_optimization in ["cross_layer_equalization"]:
+            eval("self.process_wo." + self.weight_optimization)()
+        else:
+            eval("self.process_wo." + self.weight_optimization)(quan_dataset_path)
 
 
 class_names = [
@@ -824,10 +842,7 @@ strides = {'nano': [8, 16, 32, 64], 'yolov5': [8, 16, 32]}
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_path', type=str,
-                        # default='HandDetection-NanoDetPlus/onnx_weights/nanodet_plus_320_320_simplify.onnx',
-                        # default='work_dir/nanodet_plus_320_320_simplify_bias_correction.onnx',
-                        # default='work_dir/nanodet_plus_320_320_simplify_cross_layer_equalization.onnx',
-                        default='work_dir/qat/test_hand_detection/nanodet_plus_320_320_simplify_qat_340.onnx',
+                        default='HandDetection-NanoDetPlus/onnx_weights/nanodet_plus_320_320_simplify.onnx',
                         help='checkpoint path')
     parser.add_argument('--quan_dataset_path', type=str, 
                         default='/buffer/hand_detection/calibrate_imgs',
@@ -854,19 +869,15 @@ def parse_args():
     parser.add_argument('--device', type=str, default="cpu", help='There can be two options: cpu or cuda:3')    
     parser.add_argument('--fp_result', type=bool, default=True)
     parser.add_argument('--export_version', type=int, default=3)
-    parser.add_argument('--export', type=bool, default=True)
+    parser.add_argument('--export', type=bool, default=False)
     parser.add_argument('--debug', type=bool, default=False)
     parser.add_argument('--is_stdout', type=bool, default=True)  
     parser.add_argument('--log_level', type=int, default=30)          
     parser.add_argument('--error_analyzer', type=bool, default=False)     
     parser.add_argument('--is_calc_error', type=bool, default=False) #whether to calculate each layer error
-    parser.add_argument(
-        "--calibration_params_json_path", 
-        type=str, 
-        default="work_dir/qat/test_hand_detection/calibration_340.json",
-        # default=None,
-    )       
-    args = parser.parse_args()
+    # bias_correction cross_layer_equalization
+    parser.add_argument('--weight_optimization', type=str, default="bias_correction")    
+    args = parser.parse_args()          
     return args
 
 
@@ -936,27 +947,11 @@ if __name__ == "__main__":
         "class_names": class_names,
         "process_args": process_args,
         'is_calc_error': args.is_calc_error,
+        "weight_optimization": args.weight_optimization,
         "fp_result": args.fp_result,
         "eval_mode": eval_mode,  # single quantize, dataset quatize
         'acc_error': acc_error,
     }
 
-    cocoeval = CocoEval(**kwargs_bboxeval)
-    # cocoeval.set_colors(colors=_COLORS)
-    cocoeval.set_class_names(names=class_names)
-    cocoeval.set_draw_result(is_draw=args.draw_result)
-    cocoeval.set_iou_threshold(iou_threshold=args.iou_threshold)
-    # quan_dataset_path, images_path, ann_path, input_size, normalization, save_eval_path
-    evaluation, tb = cocoeval(
-        quan_dataset_path=args.quan_dataset_path, dataset_path=args.dataset_path,
-        ann_path=args.ann_path, input_size=args.input_size, normalization=normalization,
-        save_eval_path=args.results_path,
-        calibration_params_json_path=args.calibration_params_json_path,
-    )
-    if args.is_calc_error:
-        cocoeval.collect_error_info()
-    if args.error_analyzer:
-        cocoeval.error_analysis()         
-    # if args.export:
-        # cocoeval.export()
-    print(tb)
+    cocoeval = CocoEvalWeightOpt(**kwargs_bboxeval)
+    cocoeval(quan_dataset_path=args.quan_dataset_path)
