@@ -827,16 +827,16 @@ def parse_args():
                         # default='HandDetection-NanoDetPlus/onnx_weights/nanodet_plus_320_320_simplify.onnx',
                         # default='work_dir/nanodet_plus_320_320_simplify_bias_correction.onnx',
                         # default='work_dir/nanodet_plus_320_320_simplify_cross_layer_equalization.onnx',
-                        default='work_dir/qat/test_hand_detection/nanodet_plus_320_320_simplify_qat_340.onnx',
+                        default='work_dir/qat/test_hand_detection/nanodet_plus_320_320_simplify_qat_360.onnx',
                         help='checkpoint path')
     parser.add_argument('--quan_dataset_path', type=str, 
-                        default='/buffer/hand_detection/calibrate_imgs',
+                        default='/home/zccyman/workspace/datasets/calibrate_dataset/hand_detection/calibrate_imgs',
                         help='quantize image path')
     parser.add_argument('--ann_path', type=str,
-                        default='/buffer/hand_detection/test/test.json',
+                        default='/home/zccyman/workspace/datasets/eval_dataset/hand_detection/test/test.json',
                         help='eval anno path')
     parser.add_argument('--dataset_path', type=str,
-                        default='/buffer/hand_detection/test/images',
+                        default='/home/zccyman/workspace/datasets/eval_dataset/hand_detection/test/images',
                         help='eval image path')
     parser.add_argument('--model_name', type=str, default="nano") # nano | yolov5
     parser.add_argument('--input_size', type=list, default=[320, 320])
@@ -863,7 +863,7 @@ def parse_args():
     parser.add_argument(
         "--calibration_params_json_path", 
         type=str, 
-        default="work_dir/qat/test_hand_detection/calibration_340.json",
+        default="work_dir/qat/test_hand_detection/calibration_360.json",
         # default=None,
     )       
     args = parser.parse_args()

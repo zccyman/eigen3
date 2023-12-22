@@ -532,7 +532,7 @@ class Layer(LayerInfo, LayerData, lExport):
             return [get_type(data)]
 
     def forward(self, in_data, **kwargs):
-        try:
+        if 1:
             outputs = list()
             ops_instance = self.get_ops_instance()
             layer_type = self.get_layer_type()
@@ -590,10 +590,10 @@ class Layer(LayerInfo, LayerData, lExport):
             #     else:
             #         data_0 = output0
             #     np.save(name_0, data_0.astype(np.float32))
-        except:
-            error_info = "layer of {} simulation wrong!".format(self.get_layer_name())
-            print(error_info)
-            os._exit(-1)
+        # except:
+        #     error_info = "layer of {} simulation wrong!".format(self.get_layer_name())
+        #     print(error_info)
+        #     os._exit(-1)
 
     def checkerror(self):
         pass

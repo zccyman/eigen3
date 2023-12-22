@@ -9,7 +9,7 @@ import copy
 import os
 import time
 
-import bcolz
+# import bcolz
 import numpy as np
 import sklearn
 import torch

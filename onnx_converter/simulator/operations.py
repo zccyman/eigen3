@@ -435,14 +435,14 @@ class BaseOps(object):
         return inputs
 
     def __call__(self, inputs, **kwargs):
-        try:
+        if 1:
             outputs = self.preprocess(inputs, **kwargs)
             outputs = self.forward(outputs, **kwargs)
             return self.postprocess(outputs, **kwargs)
-        except:
-            error_info = "operation of {} simulation wrong!".format(self.get_class_name())
-            print(error_info)
-            os._exit(-1)
+        # except:
+        #     error_info = "operation of {} simulation wrong!".format(self.get_class_name())
+        #     print(error_info)
+        #     os._exit(-1)
 
 
 class BaseTable(BaseOps):
