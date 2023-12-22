@@ -24,3 +24,5 @@ pyDes
 python-docx
 fitter
 pybind11
+absl-py
+tensorboard
