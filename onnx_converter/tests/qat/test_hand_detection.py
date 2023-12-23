@@ -842,7 +842,7 @@ strides = {'nano': [8, 16, 32, 64], 'yolov5': [8, 16, 32]}
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_path', type=str,
-                        default='models/nanodet_plus_320_320_simplify.onnx',
+                        default='/home/zccyman/workspace/models/nanodet_plus_320_320_simplify.onnx',
                         help='checkpoint path')
     parser.add_argument('--quan_dataset_path', type=str, 
                         default='/buffer/hand_detection/calibrate_imgs',
